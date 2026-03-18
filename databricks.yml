@@ -1,0 +1,82 @@
+bundle:
+  name: weather-dlt-pipeline-birigui
+
+workspace:
+  host: https://dbc-4755d9a9-d11b.cloud.databricks.com
+  root_path: ~/.bundle/${bundle.name}/${bundle.target}
+
+targets:
+
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      root_path: /Shared/weather-dlt-pipeline-birigui
+
+# ---------------------------------------------------------------------------
+resources:
+  jobs:
+
+    # -------------------------------------------------------------------------
+    # Job principal: coleta previsão → DLT → gold (roda a cada 6h)
+    # -------------------------------------------------------------------------
+    weather_pipeline:
+      name: "[weather] Pipeline Completo (6h)"
+      schedule:
+        quartz_cron_expression: "0 0 0/6 * * ?"
+        timezone_id: "America/Sao_Paulo"
+        pause_status: UNPAUSED
+
+      tasks:
+        - task_key: coleta_previsao
+          description: "Coleta previsão atualizada da Open-Meteo e salva JSON no Volume"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/04_collect_forecast
+            source: WORKSPACE
+
+        - task_key: dlt_pipeline
+          description: "Executa o pipeline DLT Bronze→Silver→Gold"
+          depends_on:
+            - task_key: coleta_previsao
+          pipeline_task:
+            pipeline_id: bdae0918-2a68-42a8-8688-3f1f936d4946
+            full_refresh: false
+
+        - task_key: gold_today
+          description: "Gera weather_today e rain_alert para o dashboard"
+          depends_on:
+            - task_key: dlt_pipeline
+          notebook_task:
+            notebook_path: ${workspace.file_path}/05_gold_today
+            source: WORKSPACE
+
+        - task_key: update_features
+          description: "Atualiza feature store com dados do dia para o modelo ML"
+          depends_on:
+            - task_key: gold_today
+          notebook_task:
+            notebook_path: /Workspace/Users/higor_com@hotmail.com/.bundle/weather-ml-rain-forecast/dev/files/07_update_features
+            source: WORKSPACE
+
+        - task_key: ml_inference
+          description: "Executa predições do modelo de chuva e salva rain_forecast_ml"
+          depends_on:
+            - task_key: update_features
+          notebook_task:
+            notebook_path: /Workspace/Users/higor_com@hotmail.com/.bundle/weather-ml-rain-forecast/dev/files/05_batch_inference
+            source: WORKSPACE
+
+    # -------------------------------------------------------------------------
+    # Job avulso: coleta histórica (executar manualmente uma única vez)
+    # -------------------------------------------------------------------------
+    collect_history:
+      name: "[weather] Coleta Histórica (manual)"
+      tasks:
+        - task_key: collect_history
+          description: "Coleta 86 anos de dados históricos da Open-Meteo Archive API"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/01_collect_history
+            source: WORKSPACE

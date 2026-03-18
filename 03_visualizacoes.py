@@ -127,14 +127,17 @@ plt.show()
 
 # Gráfico 3: Tendência de aquecimento (1940→2026)
 
-df_anual = spark.sql("""
+from datetime import date as _date
+_ano_atual = _date.today().year
+_ano_fim   = _ano_atual - 1  # exclui ano corrente (dados incompletos)
+
+df_anual = spark.sql(f"""
     SELECT year,
            ROUND(AVG(temp_media),     2) AS temp_anual,
            ROUND(SUM(precip_mensal),  2) AS precip_anual,
            ROUND(SUM(dias_com_chuva), 0) AS dias_chuva_ano
     FROM weather_pipeline.silver.weather_monthly
-    WHERE year BETWEEN 1940 AND 2025
-      AND year != 2026
+    WHERE year BETWEEN 1940 AND {_ano_fim}
     GROUP BY year
     ORDER BY year
 """).toPandas()
@@ -153,10 +156,10 @@ axes[0].scatter(df_anual["year"], df_anual["temp_anual"],
 axes[0].plot(df_anual["year"], p_temp(df_anual["year"]),
     color="#f78166", linewidth=2.5, linestyle="--",
     label=f"Tendência: {z_temp[0]:+.4f}°C/ano")
-delta_temp = p_temp(2025) - p_temp(1940)
+delta_temp = p_temp(_ano_fim) - p_temp(1940)
 axes[0].set_title(
     f"Tendência de Temperatura — Birigui-SP\n"
-    f"Variação 1940→2025: {delta_temp:+.2f}°C",
+    f"Variação 1940→{_ano_fim}: {delta_temp:+.2f}°C",
     fontweight="bold")
 axes[0].set_xlabel("Ano")
 axes[0].set_ylabel("Temperatura Média Anual (°C)")

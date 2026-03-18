@@ -63,6 +63,9 @@ def weather_raw():
 @dlt.expect("sensacao_valida",         "apparent_temperature BETWEEN -15 AND 60")
 @dlt.expect_or_drop("data_nao_nula",   "observation_time IS NOT NULL")
 @dlt.expect_or_fail("chuva_positiva",  "precipitation >= 0")
+@dlt.expect("ano_valido",              "year >= 1940 AND year <= 2100")
+@dlt.expect("mes_valido",              "month BETWEEN 1 AND 12")
+@dlt.expect("hora_valida",             "hour BETWEEN 0 AND 23")
 def weather_clean():
     return (
         dlt.read("weather_raw")
@@ -93,6 +96,10 @@ def weather_clean():
         # Filtra linhas sem precipitation válido
         .filter(~F.isnan(F.col("precipitation")) & F.col("precipitation").isNotNull())
 
+        # Reclassificar is_forecast por tempo (horas passadas = observação real)
+        .withColumn("is_forecast",
+            (F.col("observation_time") > F.current_timestamp()).cast("boolean"))
+
         # Features temporais
         .withColumn("year",    F.year("observation_time"))
         .withColumn("month",   F.month("observation_time"))
@@ -114,11 +121,6 @@ def weather_clean():
              .when(F.col("precipitation") <  10,   "Chuva moderada")
              .when(F.col("precipitation") <  50,   "Chuva forte")
              .otherwise("Chuva muito forte"))
-        .withColumn("cidade",     F.col("cidade"))
-        .withColumn("latitude",   F.col("latitude"))
-        .withColumn("longitude",  F.col("longitude"))
-        .withColumn("is_forecast",F.col("is_forecast"))
-
         # Selecionar colunas finais
         .select(
             "observation_time", "cidade", "latitude", "longitude",

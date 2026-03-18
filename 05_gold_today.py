@@ -17,7 +17,12 @@ print(f"   Data hoje  : {hoje}")
 print(f"   Hora atual : {agora_h}h (Brasília)")
 
 # Pegar forecast mais recente (último arquivo coletado)
-df_forecast = spark.sql("""
+# Usa variável Python `hoje` (America/Sao_Paulo) para evitar divergência
+# com CURRENT_DATE() do cluster que opera em UTC
+from datetime import timedelta as _td
+amanha = (datetime.now(TZ_BR) + _td(days=1)).strftime("%Y-%m-%d")
+
+df_forecast = spark.sql(f"""
     SELECT
         observation_time,
         temperature_2m,
@@ -30,8 +35,8 @@ df_forecast = spark.sql("""
         rain_class,
         _ingested_at
     FROM weather_pipeline.silver.weather_forecast
-    WHERE DATE(observation_time) = CURRENT_DATE()
-       OR DATE(observation_time) = DATE_ADD(CURRENT_DATE(), 1)
+    WHERE DATE(observation_time) = '{hoje}'
+       OR DATE(observation_time) = '{amanha}'
 """)
 
 # Pegar dados históricos de hoje dos anos anteriores (climatologia)
@@ -42,8 +47,8 @@ df_clima_hoje = spark.sql(f"""
         ROUND(AVG(precipitation),   2) AS precip_climatologica,
         ROUND(AVG(relative_humidity),2) AS humidity_climatologica
     FROM weather_pipeline.silver.weather_clean
-    WHERE month = MONTH(CURRENT_DATE())
-      AND day   = DAY(CURRENT_DATE())
+    WHERE month = MONTH(TO_DATE('{hoje}'))
+      AND day   = DAY(TO_DATE('{hoje}'))
       AND year BETWEEN 1991 AND 2020
       AND is_forecast = false
     GROUP BY hour
@@ -78,7 +83,7 @@ print(f"gold.weather_today: {total} registros")
 # Criar tabela gold.rain_alert (responde: vai chover?)
 print("Calculando alertas de chuva...\n")
 
-spark.sql("""
+spark.sql(f"""
     CREATE OR REPLACE TABLE weather_pipeline.gold.rain_alert AS
     SELECT
         DATE(observation_time)              AS data,
@@ -111,7 +116,7 @@ spark.sql("""
         _ingested_at AS ultima_atualizacao
 
     FROM weather_pipeline.silver.weather_forecast
-    WHERE DATE(observation_time) = CURRENT_DATE()
+    WHERE DATE(observation_time) = '{hoje}'
     ORDER BY observation_time
 """)
 

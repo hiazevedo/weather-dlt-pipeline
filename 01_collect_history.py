@@ -1,17 +1,15 @@
 # Databricks notebook source
+
+# COMMAND ----------
+
+# MAGIC %run ./config
+
+# COMMAND ----------
+
 import requests
 import json
 from datetime import datetime, timezone, date, timedelta
 import time
-
-# COMMAND ----------
-
-# Coordenadas de Birigui-SP
-LAT       = -21.2878
-LON       = -50.3409
-CIDADE    = "Birigui-SP"
-TIMEZONE  = "America/Sao_Paulo"
-RAW_PATH  = "/Volumes/weather_pipeline/bronze/raw_json"
 
 print(f"   Coleta meteorológica — {CIDADE}")
 print(f"   Lat/Lon : {LAT}, {LON}")
@@ -40,7 +38,7 @@ def fetch_historical(start: str, end: str) -> dict:
             ]),
             "timezone":             TIMEZONE
         },
-        timeout=30
+        timeout=API_TIMEOUT
     )
     resp.raise_for_status()
     return resp.json()
@@ -67,10 +65,10 @@ def fetch_forecast() -> dict:
                 "precipitation_sum",
                 "rain_sum"
             ]),
-            "forecast_days":  7,
+            "forecast_days":  FORECAST_DAYS,
             "timezone":       TIMEZONE
         },
-        timeout=30
+        timeout=API_TIMEOUT
     )
     resp.raise_for_status()
     return resp.json()
@@ -97,9 +95,8 @@ print("Funções definidas")
 print("Coletando histórico completo 1940→2026...\n")
 
 hoje         = date.today()
-ANO_INICIO   = 1940
+ANO_INICIO   = HIST_ANO_INICIO
 ANO_FIM      = hoje.year
-DELAY_SEG    = 2   # respeitar rate limit da API
 
 # Gerar janelas anuais
 janelas = []
@@ -113,8 +110,8 @@ for ano in range(ANO_INICIO, ANO_FIM + 1):
     janelas.append((start, end))
 
 print(f"   Janelas : {len(janelas)} anos ({ANO_INICIO}→{ANO_FIM})")
-print(f"   Delay   : {DELAY_SEG}s entre chamadas")
-print(f"   Tempo   : ~{len(janelas) * DELAY_SEG / 60:.0f} minutos\n")
+print(f"   Delay   : {API_DELAY_SEG}s entre chamadas")
+print(f"   Tempo   : ~{len(janelas) * API_DELAY_SEG / 60:.0f} minutos\n")
 
 total_horas = 0
 erros       = 0
@@ -131,11 +128,11 @@ for i, (start, end) in enumerate(janelas, 1):
         total_horas += horas
         print(f"✅ {horas:,} horas")
 
-        time.sleep(DELAY_SEG)
+        time.sleep(API_DELAY_SEG)
 
     except Exception as e:
         erros += 1
-        print(f"{str(e)[:60]}")
+        print(f"❌ ERRO: {type(e).__name__}: {e}")
         time.sleep(5)  # esperar mais em caso de erro
 
 print(f"""
@@ -158,7 +155,7 @@ try:
     print(f"Previsão salva: {dias} dias")
     print(f"   Arquivo: {filename}")
 except Exception as e:
-    print(f"Erro: {e}")
+    print(f"❌ Erro ao coletar previsão: {type(e).__name__}: {e}")
 
 # COMMAND ----------
 
