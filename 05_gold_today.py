@@ -42,18 +42,22 @@ df_forecast = spark.sql(f"""
        OR DATE(observation_time) = '{amanha}'
 """)
 
-# Pegar dados históricos de hoje dos anos anteriores (climatologia)
+# Climatologia por hora: média 1991–2020 numa janela de ±7 dias em torno da
+# data de hoje (15 dias × 30 anos = 450 valores por hora). Usar só o mesmo dia
+# do calendário (30 valores) deixava a normal ruidosa.
+# Distância circular em dias do ano, para a janela funcionar na virada do ano.
 df_clima_hoje = spark.sql(f"""
+    WITH ref AS (SELECT DAYOFYEAR(TO_DATE('{hoje}')) AS doy)
     SELECT
         hour,
         ROUND(AVG(temperature_2m),  2) AS temp_climatologica,
         ROUND(AVG(precipitation),   2) AS precip_climatologica,
         ROUND(AVG(relative_humidity),2) AS humidity_climatologica
-    FROM weather_pipeline.silver.weather_clean
-    WHERE month = MONTH(TO_DATE('{hoje}'))
-      AND day   = DAY(TO_DATE('{hoje}'))
-      AND year BETWEEN 1991 AND 2020
+    FROM weather_pipeline.silver.weather_clean, ref
+    WHERE year BETWEEN 1991 AND 2020
       AND is_forecast = false
+      AND LEAST(ABS(DAYOFYEAR(observation_time) - ref.doy),
+                365 - ABS(DAYOFYEAR(observation_time) - ref.doy)) <= 7
     GROUP BY hour
     ORDER BY hour
 """)

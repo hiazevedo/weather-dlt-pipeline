@@ -84,6 +84,50 @@ resources:
             source: WORKSPACE
 
     # -------------------------------------------------------------------------
+    # Job semanal: backfill com o Archive (ERA5) → DLT → reconstrução das features
+    # Fecha buracos deixados por falhas e troca as horas recentes pelos dados
+    # do Archive (mesma fonte do treino). Domingo 04h, fora dos horários do job de 6 h.
+    # -------------------------------------------------------------------------
+    backfill_archive:
+      name: "[weather] Backfill semanal (Archive ERA5)"
+      schedule:
+        quartz_cron_expression: "0 0 4 ? * SUN"
+        timezone_id: "America/Sao_Paulo"
+        pause_status: UNPAUSED
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      tasks:
+        - task_key: backfill_archive
+          max_retries: 2
+          min_retry_interval_millis: 300000
+          description: "Regrava historical_<ano>.json até hoje − 5 dias"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/06_backfill_archive
+            source: WORKSPACE
+
+        - task_key: dlt_pipeline
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          depends_on:
+            - task_key: backfill_archive
+          pipeline_task:
+            pipeline_id: bdae0918-2a68-42a8-8688-3f1f936d4946
+            full_refresh: false
+
+        - task_key: rebuild_features
+          max_retries: 2
+          min_retry_interval_millis: 60000
+          description: "Reconstrói gold.rain_features a partir da silver atualizada"
+          depends_on:
+            - task_key: dlt_pipeline
+          notebook_task:
+            notebook_path: /Workspace/Users/higor_com@hotmail.com/.bundle/weather-ml-rain-forecast/dev/files/01_feature_engineering
+            source: WORKSPACE
+
+    # -------------------------------------------------------------------------
     # Job avulso: coleta histórica (executar manualmente uma única vez)
     # -------------------------------------------------------------------------
     collect_history:

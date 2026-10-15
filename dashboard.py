@@ -181,8 +181,8 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Temperatura de hoje vs normal histórica
-# MAGIC > Por hora: observado + previsão de hoje × média 1991–2020 do mesmo dia
+# MAGIC ## 3. Temperatura de hoje vs média histórica
+# MAGIC > Por hora: observado + previsão de hoje × média 1991–2020 numa janela de ±7 dias em torno da data
 
 # COMMAND ----------
 
@@ -198,14 +198,14 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Desempenho — modelo vs API vs validação
-# MAGIC > **Produção**: horas com chuva observada em que existem previsão do modelo e da API (mesmas horas). **API**: baseline "a Open-Meteo prevê > 0 mm". **Validação**: teste dos últimos 24 meses do champion. Com menos de 48 h observadas a amostra é pequena.
+# MAGIC ## 4. Desempenho — modelo vs API vs teste
+# MAGIC > **Produção**: horas com chuva observada em que existem previsão do modelo e da API (mesmas horas). **API**: baseline "a Open-Meteo prevê > 0 mm". **Teste**: últimos 12 meses fora do treino, no limiar do champion (os 12 meses anteriores calibram o limiar). Com menos de 48 h observadas a amostra é pequena.
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC -- Produção: horas com chuva observada em que há previsão do modelo E da API
-# MAGIC -- (mesmas horas para os dois). Validação: teste dos últimos 24 meses do champion.
+# MAGIC -- (mesmas horas para os dois). Teste: últimos 12 meses fora do treino, no limiar do champion.
 # MAGIC WITH base AS (
 # MAGIC   SELECT pred_vai_chover, api_vai_chover, choveu FROM weather_pipeline.gold.rain_model_accuracy_hourly
 # MAGIC   WHERE api_precip_alvo IS NOT NULL
@@ -244,7 +244,7 @@
 # MAGIC     m.acc AS m_acc, m.prec AS m_prec, m.rec AS m_rec, m.f1 AS m_f1,
 # MAGIC     a.vp AS a_vp, a.vn AS a_vn, a.fp AS a_fp, a.fn AS a_fn,
 # MAGIC     a.acc AS a_acc, a.prec AS a_prec, a.rec AS a_rec, a.f1 AS a_f1,
-# MAGIC     c.version AS ver, c.test_size AS v_n,
+# MAGIC     c.version AS ver, c.threshold AS v_thr, c.test_size AS v_n,
 # MAGIC     c.accuracy AS v_acc, c.precision AS v_prec, c.recall AS v_rec, c.f1 AS v_f1
 # MAGIC   FROM met m
 # MAGIC   JOIN met a ON m.src = 'modelo' AND a.src = 'api'
@@ -253,7 +253,7 @@
 # MAGIC SELECT 1 AS ord, 'Observações (horas)' AS `Métrica`,
 # MAGIC        CAST(n AS STRING) AS `Modelo (produção)`,
 # MAGIC        CAST(n AS STRING) AS `API Open-Meteo (produção)`,
-# MAGIC        CAST(v_n AS STRING) AS `Modelo (validação 24 meses)` FROM f
+# MAGIC        CAST(v_n AS STRING) AS `Modelo (teste 12 meses)` FROM f
 # MAGIC UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END FROM f
 # MAGIC UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END FROM f
 # MAGIC UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END  FROM f
@@ -274,14 +274,14 @@
 # MAGIC          WHEN COALESCE(m_f1, 0) < COALESCE(a_f1, 0) - 0.02 THEN '⚠️ API supera o modelo'
 # MAGIC          ELSE '≈ Empate com a API'
 # MAGIC        END,
-# MAGIC        CONCAT('v', ver, ' (@champion)') FROM f
+# MAGIC        CONCAT('v', ver, ' · limiar ', REPLACE(CAST(v_thr AS STRING), '.', ',')) FROM f
 # MAGIC ORDER BY ord
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. Resumo de Alertas — hoje e amanhã
-# MAGIC > Uma linha por hora (observado + previsão). **vs Normal**: diferença para a média 1991–2020 da mesma hora/dia (🔴 ≥ +2 °C, 🔵 ≤ −2 °C).
+# MAGIC > Uma linha por hora (observado + previsão). **Diferença p/ média histórica**: temperatura da hora − média 1991–2020 da mesma hora (janela de ±7 dias em torno da data; 🔴 ≥ +2 °C, 🔵 ≤ −2 °C).
 # MAGIC > **Faixa de temperatura** é a classe da temperatura do ar. **Modelo**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
 
 # COMMAND ----------
@@ -308,7 +308,7 @@
 # MAGIC            ELSE '⚪ ' END,
 # MAGIC       CASE WHEN wt.temperature_2m >= wt.temp_climatologica THEN '+' ELSE '' END,
 # MAGIC       ROUND(wt.temperature_2m - wt.temp_climatologica, 1))
-# MAGIC   END                                                               AS `vs Normal (°C)`,
+# MAGIC   END                                                               AS `Diferença p/ média histórica (°C)`,
 # MAGIC   wt.temp_class                                                     AS `Faixa de temperatura`,
 # MAGIC   CASE
 # MAGIC     WHEN wt.precipitation IS NULL THEN '—'
@@ -333,7 +333,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Precipitação Média por Mês (estação seca vs chuvosa)
+# MAGIC ## 6. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -358,13 +358,14 @@
 # MAGIC   ROUND(SUM(precip_total) / COUNT(DISTINCT year), 1)  AS precip_media_mensal_acum,
 # MAGIC   ROUND(AVG(CAST(teve_chuva AS INT)) * 100, 1)        AS pct_dias_com_chuva
 # MAGIC FROM weather_pipeline.silver.weather_daily
+# MAGIC WHERE year BETWEEN 1991 AND 2020   -- mesma referência das demais comparações
 # MAGIC GROUP BY month
 # MAGIC ORDER BY month
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Temperatura Histórica por Mês (sazonalidade)
+# MAGIC ## 7. Temperatura por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -389,6 +390,7 @@
 # MAGIC   ROUND(AVG(temp_avg), 1)  AS temp_media,
 # MAGIC   ROUND(AVG(temp_min), 1)  AS temp_min_media
 # MAGIC FROM weather_pipeline.silver.weather_daily
+# MAGIC WHERE year BETWEEN 1991 AND 2020   -- mesma referência das demais comparações
 # MAGIC GROUP BY month
 # MAGIC ORDER BY month
 

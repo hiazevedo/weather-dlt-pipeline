@@ -96,6 +96,7 @@ weather-dlt-pipeline/
 ├── 03_visualizacoes.py      # 4 gráficos históricos de tendência climática
 ├── 04_collect_forecast.py   # Coleta previsão atualizada (6h)
 ├── 05_gold_today.py         # gold.weather_today + gold.rain_alert
+├── 06_backfill_archive.py   # Backfill semanal com o Archive (ERA5)
 ├── dashboard.py             # Notebook de dashboard Databricks SQL
 └── analyze_tables.py        # Inspeção e exploração das tabelas Delta
 ```
@@ -120,6 +121,23 @@ Weather Birigui - Previsao + ML (6h)
        │
   ml_inference     ← predições modelo RandomForest 24h
 ```
+
+Um segundo job roda **semanalmente** e mantém a série consistente:
+
+```
+[weather] Backfill semanal (Archive ERA5)
+  Schedule: domingo 04h (Brasília)
+
+  backfill_archive  ← regrava historical_<ano>.json até hoje − 5 dias (atraso do Archive)
+       │
+  dlt_pipeline      ← a silver prioriza historical_* sobre forecast_* na mesma hora
+       │
+  rebuild_features  ← reconstrói gold.rain_features (bundle de ML)
+```
+
+Ele fecha sozinho buracos deixados por falhas do job de 6 h e troca, nas horas
+recentes, o "passado" da API de previsão pelos dados do Archive — a mesma fonte
+usada no treino do modelo.
 
 Para fazer o deploy:
 
