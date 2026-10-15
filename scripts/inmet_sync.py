@@ -14,7 +14,8 @@ O que faz, para cada ano pedido:
   2. baixa o zip, extrai só as estações num raio de --raio-km da cidade
      (LAT/LON do config.py) e mantém a versão com a data final mais recente;
   3. envia os CSVs para o Volume weather_pipeline.bronze.inmet (Databricks CLI);
-  4. com --ingerir, dispara o notebook 10_ingest_inmet (silver.inmet_hourly).
+  4. com --ingerir e se algo foi enviado, dispara o notebook 10_ingest_inmet
+     (silver.inmet_hourly).
 
 Uso:
   python3 scripts/inmet_sync.py                  # ano anterior e corrente (uso mensal)
@@ -163,7 +164,9 @@ def main():
         log.info("%d: %d estações enviadas (dados até %s)", ano, len(est),
                  ", ".join(f"{c}:{d[6:]}/{d[4:6]}" for c, d in sorted(est.items())))
 
-    if a.ingerir:
+    if a.ingerir and enviados == 0:
+        log.info("nada novo — ingestão não disparada (o job semanal também reprocessa o Volume)")
+    elif a.ingerir:
         user = json.loads(databricks("current-user", "me", "-o", "json").stdout)["userName"]
         nb = BUNDLE_FILES.format(user=user) + "/10_ingest_inmet"
         run = json.loads(databricks("jobs", "submit", "--no-wait", "-o", "json", "--json", json.dumps(
