@@ -88,7 +88,7 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
 
 ```
 weather-dlt-pipeline/
-├── config.py                # Constantes centralizadas (LAT, LON, paths, timeouts)
+├── config.py                # Constantes centralizadas (LAT, LON, paths, variáveis horárias, modelo do Archive)
 ├── databricks.yml           # Databricks Asset Bundle — Workflow completo (6h)
 ├── 00_setup.py              # Catalog, schemas, volumes
 ├── 01_collect_history.py    # 87 anos histórico — 755k registros
@@ -97,6 +97,12 @@ weather-dlt-pipeline/
 ├── 04_collect_forecast.py   # Coleta previsão atualizada (6h)
 ├── 05_gold_today.py         # gold.weather_today + gold.rain_alert
 ├── 06_backfill_archive.py   # Backfill semanal com o Archive (ERA5)
+├── 07_collect_enso.py       # Índice ENSO (ONI/NOAA) → silver.enso_oni
+├── 08_collect_gauges.py     # Pluviômetros históricos (GHCN-Daily) → silver.gauge_daily
+├── 09_collect_previous_runs.py # Previsões arquivadas com antecedência → silver.forecast_previous_runs
+├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
+├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
+├── scripts/agendar_inmet_sync.ps1 # Agenda o inmet_sync no Windows (semanal)
 ├── dashboard.py             # Notebook de dashboard Databricks SQL
 └── analyze_tables.py        # Inspeção e exploração das tabelas Delta
 ```
@@ -125,8 +131,12 @@ Weather Birigui - Previsao + ML (6h)
 Um segundo job roda **semanalmente** e mantém a série consistente:
 
 ```
-[weather] Backfill semanal (Archive ERA5)
+[weather] Semanal — Archive ERA5, ENSO e previsões arquivadas
   Schedule: domingo 04h (Brasília)
+
+  collect_enso           ← índice ONI da NOAA (mensal; independente)
+  collect_previous_runs  ← previsões arquivadas d0/d1/d2 (base para MOS; independente)
+  ingest_inmet           ← CSVs do INMET enviados pelo script local (independente)
 
   backfill_archive  ← regrava historical_<ano>.json até hoje − 5 dias (atraso do Archive)
        │
@@ -138,6 +148,38 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
 Ele fecha sozinho buracos deixados por falhas do job de 6 h e troca, nas horas
 recentes, o "passado" da API de previsão pelos dados do Archive — a mesma fonte
 usada no treino do modelo.
+
+### Fontes de dados
+
+| Fonte | O que traz | Tabela |
+|---|---|---|
+| Open-Meteo Archive (ERA5/IFS) | Série horária desde 1940 — temperatura, chuva, umidade, vento + orvalho, pressão, nuvens por camada, direção do vento, vapor d'água na coluna e camada limite | `silver.weather_clean` |
+| Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis) a cada 6 h | `silver.weather_forecast` |
+| Open-Meteo Previous Runs | O que cada rodada previu 0, 1 e 2 dias antes (desde 2024) | `silver.forecast_previous_runs` |
+| NOAA CPC | Índice ONI (El Niño / La Niña), global | `silver.enso_oni` |
+| NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997) | `silver.gauge_daily` |
+| INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
+
+#### INMET: por que um script local
+
+O INMET recusa conexões vindas de IPs de nuvem (o Databricks não consegue
+conectar) e de clientes sem User-Agent de navegador. Por isso a coleta roda na
+máquina local:
+
+- `scripts/inmet_sync.py` baixa os pacotes anuais de
+  [portal.inmet.gov.br/dadoshistoricos](https://portal.inmet.gov.br/dadoshistoricos)
+  (atualizados ~1x por mês), extrai as estações do raio e envia os CSVs para o
+  Volume `bronze.inmet`; só reprocessa um ano quando o pacote muda.
+- `scripts/agendar_inmet_sync.ps1` registra a execução semanal no Agendador de
+  Tarefas do Windows (o WSL é iniciado pela tarefa).
+- `10_ingest_inmet` (task `ingest_inmet` do job semanal) gera `silver.inmet_hourly`
+  em hora local.
+
+Dados horários quase em tempo real exigiriam a API do INMET com token
+(solicitado por e-mail a cadastro.act@inmet.gov.br), também a partir da rede local.
+
+As variáveis horárias e o modelo do Archive ficam em `config.py`
+(`HOURLY_VARS`, `ARCHIVE_MODEL`).
 
 Para fazer o deploy:
 
