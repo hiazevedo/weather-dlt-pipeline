@@ -8,7 +8,7 @@ workspace:
 targets:
 
   dev:
-    mode: development
+    # Sem mode: development — esse modo pausa todos os schedules a cada deploy
     default: true
 
   prod:
@@ -30,14 +30,22 @@ resources:
         timezone_id: "America/Sao_Paulo"
         pause_status: UNPAUSED
 
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
       tasks:
         - task_key: coleta_previsao
+          max_retries: 2
+          min_retry_interval_millis: 60000
           description: "Coleta previsão atualizada da Open-Meteo e salva JSON no Volume"
           notebook_task:
             notebook_path: ${workspace.file_path}/04_collect_forecast
             source: WORKSPACE
 
         - task_key: dlt_pipeline
+          max_retries: 2
+          min_retry_interval_millis: 60000
           description: "Executa o pipeline DLT Bronze→Silver→Gold"
           depends_on:
             - task_key: coleta_previsao
@@ -46,6 +54,8 @@ resources:
             full_refresh: false
 
         - task_key: gold_today
+          max_retries: 2
+          min_retry_interval_millis: 60000
           description: "Gera weather_today e rain_alert para o dashboard"
           depends_on:
             - task_key: dlt_pipeline
@@ -54,6 +64,8 @@ resources:
             source: WORKSPACE
 
         - task_key: update_features
+          max_retries: 2
+          min_retry_interval_millis: 60000
           description: "Atualiza feature store com dados do dia para o modelo ML"
           depends_on:
             - task_key: gold_today
@@ -62,6 +74,8 @@ resources:
             source: WORKSPACE
 
         - task_key: ml_inference
+          max_retries: 2
+          min_retry_interval_millis: 60000
           description: "Executa predições do modelo de chuva e salva rain_forecast_ml"
           depends_on:
             - task_key: update_features

@@ -1,6 +1,7 @@
 # Databricks notebook source
 import dlt
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from pyspark.sql.types import (
     StructType, StructField, StringType,
     DoubleType, ArrayType, FloatType
@@ -121,6 +122,15 @@ def weather_clean():
              .when(F.col("precipitation") <  10,   "Chuva moderada")
              .when(F.col("precipitation") <  50,   "Chuva forte")
              .otherwise("Chuva muito forte"))
+        # Deduplicar por hora: cada forecast_*.json repete 7 dias de passado.
+        # Prioridade: arquivo histórico (Archive API) > forecast mais recente.
+        .withColumn("_rn", F.row_number().over(
+            Window.partitionBy("observation_time").orderBy(
+                F.col("_source_file").contains("historical").desc(),
+                F.col("collected_at").desc(),
+            )))
+        .filter(F.col("_rn") == 1)
+
         # Selecionar colunas finais
         .select(
             "observation_time", "cidade", "latitude", "longitude",
