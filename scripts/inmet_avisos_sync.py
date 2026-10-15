@@ -6,7 +6,8 @@ intensas, vendaval, baixa umidade…), com municípios afetados (código IBGE),
 severidade, início/fim, riscos, instruções e polígono.
 
 Roda FORA do Databricks pelo mesmo motivo do inmet_sync.py: o INMET recusa
-conexões de IPs de nuvem e de clientes sem User-Agent de navegador.
+conexões de IPs de nuvem e de clientes sem User-Agent de navegador. Agendado
+no celular Android (Termux + cron) — ver scripts/termux/.
 
 O que faz:
   1. baixa os avisos ativos e futuros (apiprevmet3.inmet.gov.br/avisos/ativos);
@@ -27,11 +28,12 @@ import tempfile
 import pathlib
 import urllib.request
 
-# reaproveita CLI do Databricks, config e cabeçalho do coletor do INMET
-from inmet_sync import CACHE, UA, BUNDLE_FILES, carregar_config, databricks
+import dbx
+# reaproveita config, cache e cabeçalho do coletor do INMET
+from inmet_sync import CACHE, UA, BUNDLE_FILES, carregar_config
 
 URL = "https://apiprevmet3.inmet.gov.br/avisos/ativos"
-VOLUME = "dbfs:/Volumes/weather_pipeline/bronze/inmet_avisos"
+VOLUME = "/Volumes/weather_pipeline/bronze/inmet_avisos"
 CAMPOS = ["id", "id_aviso", "codigo", "descricao", "severidade", "id_severidade", "id_condicao_severa",
           "aviso_cor", "inicio", "fim", "data_inicio", "data_fim", "hora_inicio", "hora_fim",
           "riscos", "instrucoes", "estados", "regioes", "mesorregioes", "microrregioes",
@@ -89,17 +91,13 @@ def main():
     with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
         arq = pathlib.Path(tmp) / "avisos.json"
         arq.write_text(json.dumps(payload, ensure_ascii=False))
-        databricks("volumes", "create", "weather_pipeline", "bronze", "inmet_avisos", "MANAGED", check=False)
-        databricks("fs", "mkdir", destino.rsplit("/", 1)[0])     # cp de arquivo não cria pastas
-        databricks("fs", "cp", "--overwrite", str(arq), destino)
+        dbx.criar_volume("weather_pipeline", "bronze", "inmet_avisos")
+        dbx.enviar_arquivo(arq, destino)
 
-    user = json.loads(databricks("current-user", "me", "-o", "json").stdout)["userName"]
-    run = json.loads(databricks("jobs", "submit", "--no-wait", "-o", "json", "--json", json.dumps(
-        {"run_name": "INMET — ingestão de avisos (inmet_avisos_sync)",
-         "tasks": [{"task_key": "ingest", "notebook_task": {
-             "notebook_path": BUNDLE_FILES.format(user=user) + "/11_ingest_avisos"}}]})).stdout)
+    run_id = dbx.disparar_notebook("INMET — ingestão de avisos (inmet_avisos_sync)",
+                                   BUNDLE_FILES.format(user=dbx.usuario_atual()) + "/11_ingest_avisos")
     estado_path.write_text(json.dumps({"assinatura": assinatura, "enviado_em": agora.isoformat(timespec="seconds")}))
-    log.info("snapshot enviado (%s) e ingestão disparada (run_id %s)", destino.rsplit("/", 1)[-1], run["run_id"])
+    log.info("snapshot enviado (%s) e ingestão disparada (run_id %s)", destino.rsplit("/", 1)[-1], run_id)
 
 
 if __name__ == "__main__":

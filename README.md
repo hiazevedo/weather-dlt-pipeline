@@ -103,9 +103,9 @@ weather-dlt-pipeline/
 ├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
 ├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
-├── scripts/agendar_inmet_sync.ps1 # Agenda o inmet_sync no Windows (semanal)
 ├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
-├── scripts/agendar_inmet_avisos.ps1 # Agenda o inmet_avisos_sync no Windows (a cada 3 h)
+├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
+├── scripts/termux/          # Instalação e agendamento no celular Android (Termux + cron)
 ├── dashboard.py             # Notebook de dashboard Databricks SQL
 └── analyze_tables.py        # Inspeção e exploração das tabelas Delta
 ```
@@ -164,22 +164,24 @@ usada no treino do modelo.
 | INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada 3 h | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
 | INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
 
-#### INMET: por que um script local
+#### INMET: por que um coletor local (celular Android)
 
 O INMET recusa conexões vindas de IPs de nuvem (o Databricks não consegue
-conectar) e de clientes sem User-Agent de navegador. Por isso a coleta roda na
-máquina local:
+conectar) e de clientes sem User-Agent de navegador. Por isso a coleta roda num
+celular Android na tomada, no Wi-Fi de casa, com Termux + cron — instalação em
+[`scripts/termux/README.md`](scripts/termux/README.md). O envio ao Databricks
+usa a API REST (`scripts/dbx.py`).
 
 - `scripts/inmet_sync.py` baixa os pacotes anuais de
   [portal.inmet.gov.br/dadoshistoricos](https://portal.inmet.gov.br/dadoshistoricos)
   (atualizados ~1x por mês), extrai as estações do raio e envia os CSVs para o
   Volume `bronze.inmet`; só reprocessa um ano quando o pacote muda.
-- `scripts/agendar_inmet_sync.ps1` registra a execução semanal no Agendador de
-  Tarefas do Windows (o WSL é iniciado pela tarefa).
+- O cron do celular roda o `inmet_sync.py --ingerir` diariamente (só baixa quando
+  o pacote muda).
 - `10_ingest_inmet` (task `ingest_inmet` do job semanal) gera `silver.inmet_hourly`
   em hora local.
-- Avisos: `scripts/inmet_avisos_sync.py` (agendado a cada 3 h por
-  `scripts/agendar_inmet_avisos.ps1`) baixa os avisos ativos e futuros da UF, envia
+- Avisos: `scripts/inmet_avisos_sync.py` (cron do celular, a cada 3 h) baixa os
+  avisos ativos e futuros da UF, envia
   um snapshot ao Volume `bronze.inmet_avisos` quando algo muda e dispara o
   `11_ingest_avisos`, que também roda no job de 6 h como reforço.
 

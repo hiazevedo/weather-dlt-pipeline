@@ -4,6 +4,7 @@
 Por que roda FORA do Databricks: o INMET recusa conexões vindas de IPs de
 nuvem (o Databricks não consegue nem abrir a conexão) e de clientes sem
 User-Agent de navegador. Da rede brasileira, com o cabeçalho, funciona.
+Agendado no celular Android (Termux + cron) — ver scripts/termux/.
 
 Fonte: os pacotes anuais em portal.inmet.gov.br/dadoshistoricos (todas as
 estações automáticas, um zip por ano, atualizado mensalmente; o do ano
@@ -13,7 +14,7 @@ O que faz, para cada ano pedido:
   1. confere o Last-Modified do zip — se não mudou desde a última execução, pula;
   2. baixa o zip, extrai só as estações num raio de --raio-km da cidade
      (LAT/LON do config.py) e mantém a versão com a data final mais recente;
-  3. envia os CSVs para o Volume weather_pipeline.bronze.inmet (Databricks CLI);
+  3. envia os CSVs para o Volume weather_pipeline.bronze.inmet (API REST, scripts/dbx.py);
   4. com --ingerir e se algo foi enviado, dispara o notebook 10_ingest_inmet
      (silver.inmet_hourly).
 
@@ -25,7 +26,6 @@ Uso:
 import argparse
 import contextlib
 import datetime as dt
-import glob
 import importlib.util
 import io
 import json
@@ -34,18 +34,18 @@ import math
 import os
 import pathlib
 import shutil
-import subprocess
-import sys
 import tempfile
 import urllib.request
 import zipfile
+
+import dbx
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CACHE = pathlib.Path(os.environ.get("INMET_SYNC_CACHE", pathlib.Path.home() / ".cache" / "inmet_sync"))
 URL = "https://portal.inmet.gov.br/uploads/dadoshistoricos/{ano}.zip"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/129.0 Safari/537.36")
-VOLUME = "dbfs:/Volumes/weather_pipeline/bronze/inmet"
+VOLUME = "/Volumes/weather_pipeline/bronze/inmet"
 BUNDLE_FILES = "/Workspace/Users/{user}/.bundle/weather-dlt-pipeline-birigui/dev/files"
 
 log = logging.getLogger("inmet_sync")
@@ -58,22 +58,6 @@ def carregar_config():
     with contextlib.redirect_stdout(io.StringIO()):
         spec.loader.exec_module(cfg)
     return cfg
-
-
-def cli():
-    """Caminho do Databricks CLI: $DATABRICKS_CLI, PATH ou o que vem com a extensão do VSCode."""
-    for c in [os.environ.get("DATABRICKS_CLI"), shutil.which("databricks"),
-              *sorted(glob.glob(str(pathlib.Path.home() / ".vscode-server/extensions/databricks.databricks-*/bin/databricks")))[::-1]]:
-        if c and os.access(c, os.X_OK):
-            return c
-    sys.exit("Databricks CLI não encontrado (defina DATABRICKS_CLI).")
-
-
-def databricks(*args, check=True):
-    r = subprocess.run([cli(), *args], capture_output=True, text=True)
-    if check and r.returncode != 0:
-        raise RuntimeError(f"databricks {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
-    return r
 
 
 def http(url, metodo="GET"):
@@ -139,7 +123,7 @@ def main():
     log.info("INMET → Databricks | %s (%.4f, %.4f) | raio %.0f km | anos %d–%d",
              cfg.CIDADE, cfg.LAT, cfg.LON, a.raio_km, a.desde, a.ate)
 
-    databricks("volumes", "create", "weather_pipeline", "bronze", "inmet", "MANAGED", check=False)
+    dbx.criar_volume("weather_pipeline", "bronze", "inmet")
     enviados = 0
     for ano in range(a.desde, a.ate + 1):
         try:
@@ -156,9 +140,9 @@ def main():
                 shutil.copyfileobj(r, f, 1 << 20)
             saida = pathlib.Path(tmp) / str(ano)
             est = extrair(zip_path, saida, cfg.LAT, cfg.LON, a.raio_km)
-            if est:
-                databricks("fs", "cp", "-r", "--overwrite", str(saida), f"{VOLUME}/{ano}")
-                enviados += len(est)
+            for cod in est:
+                dbx.enviar_arquivo(saida / f"{cod}.csv", f"{VOLUME}/{ano}/{cod}.csv")
+            enviados += len(est)
         estado[str(ano)] = lm
         estado_path.write_text(json.dumps(estado, indent=1))
         log.info("%d: %d estações enviadas (dados até %s)", ano, len(est),
@@ -167,12 +151,9 @@ def main():
     if a.ingerir and enviados == 0:
         log.info("nada novo — ingestão não disparada (o job semanal também reprocessa o Volume)")
     elif a.ingerir:
-        user = json.loads(databricks("current-user", "me", "-o", "json").stdout)["userName"]
-        nb = BUNDLE_FILES.format(user=user) + "/10_ingest_inmet"
-        run = json.loads(databricks("jobs", "submit", "--no-wait", "-o", "json", "--json", json.dumps(
-            {"run_name": "INMET — ingestão (inmet_sync)",
-             "tasks": [{"task_key": "ingest", "notebook_task": {"notebook_path": nb}}]})).stdout)
-        log.info("ingestão disparada no Databricks (run_id %s)", run["run_id"])
+        nb = BUNDLE_FILES.format(user=dbx.usuario_atual()) + "/10_ingest_inmet"
+        run_id = dbx.disparar_notebook("INMET — ingestão (inmet_sync)", nb)
+        log.info("ingestão disparada no Databricks (run_id %s)", run_id)
     log.info("concluído — %d arquivos de estação enviados", enviados)
 
 
