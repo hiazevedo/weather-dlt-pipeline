@@ -55,21 +55,23 @@
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC SELECT CONCAT(
-# MAGIC   CASE WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(MAX(inferencia_local))) / 60 <= 420
-# MAGIC        THEN '🟢 ' ELSE '🔴 Atrasado · ' END,
-# MAGIC   'Atualizado ', DATE_FORMAT(MAX(inferencia_local), 'dd/MM HH:mm'),
-# MAGIC   ' · ', MAX(modelo)) AS `Status`
+# MAGIC SELECT
+# MAGIC   CASE
+# MAGIC     WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(MAX(inferencia_local))) / 60 <= 420
+# MAGIC       THEN CONCAT('🟢 Atualizado às ', DATE_FORMAT(MAX(inferencia_local), 'HH:mm'))
+# MAGIC     ELSE CONCAT('🔴 Atrasado · desde ', DATE_FORMAT(MAX(inferencia_local), 'dd/MM HH:mm'))
+# MAGIC   END AS `Status`
 # MAGIC FROM weather_pipeline.gold.rain_forecast_ml
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC #### Chuva acumulada (mês e 7 dias) vs normal 1991–2020
+# MAGIC #### Chuva acumulada (mês e 7 dias) vs média 1991–2020
 
 # COMMAND ----------
 
 # MAGIC %sql
+# MAGIC -- Chuva observada vs média 1991–2020 do mesmo período do calendário
 # MAGIC WITH hoje AS (SELECT DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) AS d),
 # MAGIC dias7 AS (SELECT explode(sequence(date_sub(d, 6), d)) AS dd FROM hoje),
 # MAGIC mtd AS (
@@ -89,12 +91,18 @@
 # MAGIC   JOIN dias7 ON o.month = MONTH(dias7.dd) AND o.day = DAY(dias7.dd)
 # MAGIC   WHERE o.year BETWEEN 1991 AND 2020)
 # MAGIC SELECT
-# MAGIC   CASE WHEN mtd_n.v >= 0.5
-# MAGIC     THEN CONCAT(ROUND(mtd.v, 1), ' mm · ', CAST(ROUND(mtd.v * 100 / mtd_n.v) AS INT), '% da normal')
-# MAGIC     ELSE CONCAT(ROUND(mtd.v, 1), ' mm · normal ', ROUND(mtd_n.v, 1), ' mm') END AS `Chuva no mês`,
-# MAGIC   CASE WHEN w7_n.v >= 0.5
-# MAGIC     THEN CONCAT(ROUND(w7.v, 1), ' mm · ', CAST(ROUND(w7.v * 100 / w7_n.v) AS INT), '% da normal')
-# MAGIC     ELSE CONCAT(ROUND(w7.v, 1), ' mm · normal ', ROUND(w7_n.v, 1), ' mm') END AS `Chuva 7 dias`
+# MAGIC   CASE
+# MAGIC     WHEN mtd_n.v < 0.5 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · média: ', REPLACE(CASE WHEN mtd_n.v = 0 THEN '0' WHEN mtd_n.v < 10 THEN CAST(ROUND(mtd_n.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd_n.v) AS INT) AS STRING) END, '.', ','), ' mm')
+# MAGIC     WHEN ABS((mtd.v / mtd_n.v - 1) * 100) < 5 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · na média')
+# MAGIC     WHEN (mtd.v / mtd_n.v - 1) * 100 > 0 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND((mtd.v / mtd_n.v - 1) * 100) AS INT), '% acima da média')
+# MAGIC     ELSE CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND(-(mtd.v / mtd_n.v - 1) * 100) AS INT), '% abaixo da média')
+# MAGIC   END AS `Chuva no mês`,
+# MAGIC   CASE
+# MAGIC     WHEN w7_n.v < 0.5 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · média: ', REPLACE(CASE WHEN w7_n.v = 0 THEN '0' WHEN w7_n.v < 10 THEN CAST(ROUND(w7_n.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7_n.v) AS INT) AS STRING) END, '.', ','), ' mm')
+# MAGIC     WHEN ABS((w7.v / w7_n.v - 1) * 100) < 5 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · na média')
+# MAGIC     WHEN (w7.v / w7_n.v - 1) * 100 > 0 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND((w7.v / w7_n.v - 1) * 100) AS INT), '% acima da média')
+# MAGIC     ELSE CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND(-(w7.v / w7_n.v - 1) * 100) AS INT), '% abaixo da média')
+# MAGIC   END AS `Chuva 7 dias`
 # MAGIC FROM mtd, mtd_n, w7, w7_n
 
 # COMMAND ----------
