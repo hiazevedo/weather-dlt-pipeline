@@ -272,41 +272,54 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Resumo de Alertas — Nível por Data e Hora
-# MAGIC > Hoje e amanhã (observado + previsão)
+# MAGIC ## 5. Resumo de Alertas — hoje e amanhã
+# MAGIC > Uma linha por hora (observado + previsão). **vs Normal**: diferença para a média 1991–2020 da mesma hora/dia (🔴 ≥ +2 °C, 🔵 ≤ −2 °C).
+# MAGIC > **Faixa de temperatura** é a classe da temperatura do ar. **Modelo**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
 
 # COMMAND ----------
 
 # MAGIC %sql
+# MAGIC WITH modelo AS (
+# MAGIC   -- última previsão feita antes de cada hora-alvo (mesma regra da view de acurácia)
+# MAGIC   SELECT target_time, prob_chuva,
+# MAGIC          ROW_NUMBER() OVER (PARTITION BY target_time ORDER BY inferencia_local DESC) AS rn
+# MAGIC   FROM weather_pipeline.gold.rain_forecast_ml_history
+# MAGIC   WHERE inferencia_local < target_time
+# MAGIC )
 # MAGIC SELECT
-# MAGIC   DATE(wt.observation_time)                             AS `Data`,
-# MAGIC   wt.hour                                                AS `Hora`,
-# MAGIC   CASE WHEN wt.is_past THEN '✅ Passado' ELSE '🔮 Previsão' END AS `Tipo`,
-# MAGIC   ROUND(CAST(wt.temperature_2m AS DOUBLE), 1)            AS `Temp (°C)`,
-# MAGIC   ROUND(CAST(wt.apparent_temperature AS DOUBLE), 1)      AS `Sensação (°C)`,
-# MAGIC   ROUND(wt.temp_climatologica, 1)                        AS `Normal Histórica (°C)`,
-# MAGIC   CASE WHEN wt.acima_climatologia THEN '🔴 Acima' ELSE '🔵 Normal' END AS `vs Histórico`,
-# MAGIC   wt.temp_class                                          AS `Sensação Térmica`,
-# MAGIC   ROUND(CAST(wt.precipitation AS DOUBLE), 1)             AS `Chuva (mm)`,
-# MAGIC   ROUND(CAST(wt.relative_humidity AS DOUBLE), 0)         AS `Umidade (%)`,
-# MAGIC   wt.rain_class                                          AS `Condição`,
+# MAGIC   CONCAT(DATE_FORMAT(wt.observation_time, 'dd/MM'), ' ',
+# MAGIC          LPAD(CAST(wt.hour AS STRING), 2, '0'), 'h')               AS `Quando`,
+# MAGIC   CASE WHEN wt.is_past THEN '✅ Observado' ELSE '🔮 Previsão' END  AS `Tipo`,
+# MAGIC   ROUND(CAST(wt.temperature_2m AS DOUBLE), 1)                       AS `Temp (°C)`,
+# MAGIC   ROUND(CAST(wt.apparent_temperature AS DOUBLE), 1)                 AS `Sensação (°C)`,
 # MAGIC   CASE
-# MAGIC     WHEN ml.prob_chuva IS NULL THEN '— Sem dados'
-# MAGIC     ELSE CONCAT(ROUND(ml.prob_chuva * 100, 1), '%')
-# MAGIC   END                                                    AS `Prob. Chuva Modelo (%)`,
-# MAGIC   COALESCE(ml.alerta_chuva, '⚪ Sem previsão')           AS `Alerta Modelo`,
-# MAGIC   CASE ra.nivel_alerta
-# MAGIC     WHEN 0 THEN '🟢 Sem alerta'
-# MAGIC     WHEN 1 THEN '🟡 Atenção'
-# MAGIC     WHEN 2 THEN '🟠 Chuva'
-# MAGIC     WHEN 3 THEN '🔴 Chuva forte'
-# MAGIC     ELSE        '⚪ Sem dados'
-# MAGIC   END                                                    AS `Alerta`
-# MAGIC FROM weather_pipeline.gold.weather_today        wt
-# MAGIC LEFT JOIN weather_pipeline.gold.rain_forecast_ml ml
-# MAGIC   ON wt.observation_time = ml.target_time
-# MAGIC LEFT JOIN weather_pipeline.gold.rain_alert       ra
-# MAGIC   ON wt.observation_time = ra.observation_time
+# MAGIC     WHEN wt.temp_climatologica IS NULL THEN '—'
+# MAGIC     ELSE CONCAT(
+# MAGIC       CASE WHEN wt.temperature_2m - wt.temp_climatologica >=  2 THEN '🔴 '
+# MAGIC            WHEN wt.temperature_2m - wt.temp_climatologica <= -2 THEN '🔵 '
+# MAGIC            ELSE '⚪ ' END,
+# MAGIC       CASE WHEN wt.temperature_2m >= wt.temp_climatologica THEN '+' ELSE '' END,
+# MAGIC       ROUND(wt.temperature_2m - wt.temp_climatologica, 1))
+# MAGIC   END                                                               AS `vs Normal (°C)`,
+# MAGIC   wt.temp_class                                                     AS `Faixa de temperatura`,
+# MAGIC   CASE
+# MAGIC     WHEN wt.precipitation IS NULL THEN '—'
+# MAGIC     WHEN wt.precipitation = 0    THEN 'Sem chuva'
+# MAGIC     ELSE CONCAT(ROUND(CAST(wt.precipitation AS DOUBLE), 1), ' mm · ', wt.rain_class)
+# MAGIC   END                                                               AS `Chuva`,
+# MAGIC   ROUND(CAST(wt.relative_humidity AS DOUBLE), 0)                    AS `Umidade (%)`,
+# MAGIC   CASE
+# MAGIC     WHEN m.prob_chuva IS NULL THEN '—'
+# MAGIC     ELSE CONCAT(
+# MAGIC       CASE WHEN m.prob_chuva >= 0.85 THEN '🔴 '
+# MAGIC            WHEN m.prob_chuva >= 0.65 THEN '🟠 '
+# MAGIC            WHEN m.prob_chuva >= 0.40 THEN '🟡 '
+# MAGIC            ELSE '🟢 ' END,
+# MAGIC       CAST(ROUND(m.prob_chuva * 100) AS INT), '%')
+# MAGIC   END                                                               AS `Modelo (chance de chuva)`
+# MAGIC FROM weather_pipeline.gold.weather_today wt
+# MAGIC LEFT JOIN modelo m
+# MAGIC   ON m.target_time = wt.observation_time AND m.rn = 1
 # MAGIC ORDER BY wt.observation_time
 
 # COMMAND ----------
