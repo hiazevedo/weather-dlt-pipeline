@@ -35,6 +35,14 @@ resources:
           - ${workspace.current_user.userName}
 
       tasks:
+        # Avisos do INMET: o script local envia snapshots e já dispara a ingestão;
+        # esta task garante a atualização mesmo se aquele disparo falhar
+        - task_key: ingest_avisos
+          max_retries: 1
+          notebook_task:
+            notebook_path: ${workspace.file_path}/11_ingest_avisos
+            source: WORKSPACE
+
         - task_key: coleta_previsao
           max_retries: 2
           min_retry_interval_millis: 60000

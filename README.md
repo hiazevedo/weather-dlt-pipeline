@@ -101,8 +101,11 @@ weather-dlt-pipeline/
 ├── 08_collect_gauges.py     # Pluviômetros históricos (GHCN-Daily) → silver.gauge_daily
 ├── 09_collect_previous_runs.py # Previsões arquivadas com antecedência → silver.forecast_previous_runs
 ├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
+├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
 ├── scripts/agendar_inmet_sync.ps1 # Agenda o inmet_sync no Windows (semanal)
+├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
+├── scripts/agendar_inmet_avisos.ps1 # Agenda o inmet_avisos_sync no Windows (a cada 3 h)
 ├── dashboard.py             # Notebook de dashboard Databricks SQL
 └── analyze_tables.py        # Inspeção e exploração das tabelas Delta
 ```
@@ -158,6 +161,7 @@ usada no treino do modelo.
 | Open-Meteo Previous Runs | O que cada rodada previu 0, 1 e 2 dias antes (desde 2024) | `silver.forecast_previous_runs` |
 | NOAA CPC | Índice ONI (El Niño / La Niña), global | `silver.enso_oni` |
 | NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997) | `silver.gauge_daily` |
+| INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada 3 h | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
 | INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
 
 #### INMET: por que um script local
@@ -174,6 +178,10 @@ máquina local:
   Tarefas do Windows (o WSL é iniciado pela tarefa).
 - `10_ingest_inmet` (task `ingest_inmet` do job semanal) gera `silver.inmet_hourly`
   em hora local.
+- Avisos: `scripts/inmet_avisos_sync.py` (agendado a cada 3 h por
+  `scripts/agendar_inmet_avisos.ps1`) baixa os avisos ativos e futuros da UF, envia
+  um snapshot ao Volume `bronze.inmet_avisos` quando algo muda e dispara o
+  `11_ingest_avisos`, que também roda no job de 6 h como reforço.
 
 Dados horários quase em tempo real exigiriam a API do INMET com token
 (solicitado por e-mail a cadastro.act@inmet.gov.br), também a partir da rede local.

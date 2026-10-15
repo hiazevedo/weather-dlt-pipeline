@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Dashboard — Previsão de Chuva · Birigui SP
 # MAGIC > Espelho das queries do dashboard Lakeview **Previsão de Chuva · Birigui**.
-# MAGIC > Série histórica 1940→hoje (Open-Meteo) + champion `workspace.default.rain-forecast-birigui@champion` (rótulo Open-Meteo) + regional `workspace.default.rain-forecast-regional-inmet@champion` (chuva medida pelo INMET) + API Open-Meteo + ENSO (NOAA).
+# MAGIC > Série histórica 1940→hoje (Open-Meteo) + champion `workspace.default.rain-forecast-birigui@champion` (rótulo Open-Meteo) + regional `workspace.default.rain-forecast-regional-inmet@champion` (chuva medida pelo INMET) + API Open-Meteo + avisos do INMET + ENSO (NOAA).
 # MAGIC > `observation_time`/`target_time` estão na hora local (America/Sao_Paulo) sem fuso; por isso "agora" é `from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')`.
 
 # COMMAND ----------
@@ -103,6 +103,33 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC #### Aviso oficial mais severo ativo (INMET — repassado pela Defesa Civil)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Aviso oficial mais severo ativo para a cidade (INMET — repassado pela Defesa Civil)
+# MAGIC WITH a AS (SELECT * FROM weather_pipeline.gold.avisos_cidade),
+# MAGIC ativos AS (SELECT * FROM a WHERE situacao = 'ativo'),
+# MAGIC topo AS (SELECT * FROM ativos ORDER BY nivel DESC, fim DESC LIMIT 1),
+# MAGIC prox AS (SELECT * FROM a WHERE situacao = 'futuro' ORDER BY inicio, nivel DESC LIMIT 1)
+# MAGIC SELECT CASE
+# MAGIC   WHEN (SELECT count(*) FROM ativos) > 0 THEN (
+# MAGIC     SELECT CONCAT(CASE nivel WHEN 3 THEN '🔴 ' WHEN 2 THEN '🟠 ' ELSE '🟡 ' END,
+# MAGIC                   descricao, ' — ', severidade, ' · até ',
+# MAGIC                   DATE_FORMAT(fim, CASE WHEN DATE(fim) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) THEN 'HH:mm' ELSE 'dd/MM HH:mm' END),
+# MAGIC                   CASE WHEN (SELECT count(*) FROM ativos) > 1
+# MAGIC                        THEN CONCAT(' (+', (SELECT count(*) FROM ativos) - 1, ')') ELSE '' END)
+# MAGIC     FROM topo)
+# MAGIC   WHEN (SELECT count(*) FROM prox) > 0 THEN (
+# MAGIC     SELECT CONCAT('🟢 Nenhum ativo · próximo: ', descricao, ' (', severidade, ') em ', DATE_FORMAT(inicio, 'dd/MM'))
+# MAGIC     FROM prox)
+# MAGIC   ELSE '🟢 Nenhum aviso ativo'
+# MAGIC END AS `Avisos`
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC #### Status do pipeline — 🔴 se a última previsão tiver mais de 7 h
 
 # COMMAND ----------
@@ -161,7 +188,34 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Modelo vs Realidade (−6h a +18h)
+# MAGIC ## 2. Avisos oficiais para a cidade (INMET · Defesa Civil)
+# MAGIC > Ativos, próximos e encerrados nos últimos 7 dias, com a chuva observada e as horas em que champion e regional deram alerta dentro da janela do aviso. Views `gold.avisos_cidade` e `gold.avisos_vs_modelo`.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Avisos da cidade (ativos, próximos e encerrados nos últimos 7 dias) × chuva observada × modelos
+# MAGIC SELECT
+# MAGIC   CASE a.situacao WHEN 'ativo' THEN '⚠️ Ativo' WHEN 'futuro' THEN '🔜 Próximo' ELSE '✔️ Encerrado' END AS `Situação`,
+# MAGIC   CONCAT(CASE a.nivel WHEN 3 THEN '🔴 ' WHEN 2 THEN '🟠 ' ELSE '🟡 ' END, a.descricao)          AS `Aviso`,
+# MAGIC   a.severidade                                                                                AS `Severidade`,
+# MAGIC   DATE_FORMAT(a.inicio, 'dd/MM HH:mm')                                                        AS `Início`,
+# MAGIC   DATE_FORMAT(a.fim, 'dd/MM HH:mm')                                                           AS `Fim`,
+# MAGIC   COALESCE(CONCAT(REPLACE(CAST(m.chuva_obs_mm AS STRING), '.', ','), ' mm em ', m.horas_observadas, ' h'), '—') AS `Chuva observada`,
+# MAGIC   CASE WHEN m.horas_com_previsao > 0
+# MAGIC        THEN CONCAT(m.horas_alerta_champion, ' de ', m.horas_com_previsao, ' h') ELSE '—' END   AS `Champion: horas com alerta`,
+# MAGIC   CASE WHEN m.horas_com_previsao > 0 AND m.horas_alerta_regional IS NOT NULL
+# MAGIC        THEN CONCAT(m.horas_alerta_regional, ' de ', m.horas_com_previsao, ' h') ELSE '—' END   AS `Regional: horas com alerta`,
+# MAGIC   a.riscos                                                                                    AS `Riscos`
+# MAGIC FROM weather_pipeline.gold.avisos_cidade a
+# MAGIC LEFT JOIN weather_pipeline.gold.avisos_vs_modelo m ON m.id = a.id
+# MAGIC WHERE a.situacao IN ('ativo', 'futuro') OR a.fim >= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo') - INTERVAL 7 DAYS
+# MAGIC ORDER BY CASE a.situacao WHEN 'ativo' THEN 0 WHEN 'futuro' THEN 1 ELSE 2 END, a.inicio, a.nivel DESC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Modelo vs Realidade (−6h a +18h)
 # MAGIC > Probabilidade do champion e do regional para cada hora-alvo × chuva observada. `horas_rel` = horas em relação à hora atual; os modelos usam as features da hora t para prever t+1.
 
 # COMMAND ----------
@@ -192,7 +246,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Desempenho
+# MAGIC ## 4. Desempenho
 # MAGIC > **Champion** (rótulo Open-Meteo): produção (horas observadas, mesmas horas da API), API Open-Meteo como baseline e teste de 12 meses no limiar do champion. **Chuva medida (INMET)**: champion nas cidades das estações (validação semanal) e regional avaliado deixando cada estação de fora (como Birigui, que não tem estação), com a persistência do pluviômetro como referência.
 
 # COMMAND ----------
@@ -314,7 +368,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Acurácia por antecedência (produção)
+# MAGIC ## 5. Acurácia por antecedência (produção)
 # MAGIC > Todas as previsões do histórico (cada hora-alvo é prevista por até 4 rodadas) × chuva observada, só do champion atual. View `gold.rain_model_accuracy_by_lead`.
 
 # COMMAND ----------
@@ -358,7 +412,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Temperatura de hoje vs média histórica
+# MAGIC ## 6. Temperatura de hoje vs média histórica
 # MAGIC > Por hora: observado + previsão de hoje × média 1991–2020 numa janela de ±7 dias em torno da data.
 
 # COMMAND ----------
@@ -375,7 +429,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Resumo de Alertas — hoje e amanhã
+# MAGIC ## 7. Resumo de Alertas — hoje e amanhã
 # MAGIC > Uma linha por hora (observado + previsão). **Diferença p/ média histórica**: temperatura da hora − média 1991–2020 da mesma hora (±7 dias; 🔴 ≥ +2 °C, 🔵 ≤ −2 °C). **Modelo** e **Regional**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
 
 # COMMAND ----------
@@ -436,7 +490,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. ENSO — El Niño / La Niña (NOAA CPC)
+# MAGIC ## 8. ENSO — El Niño / La Niña (NOAA CPC)
 # MAGIC > Índice ONI: anomalia da temperatura do mar no Niño 3.4 (média de 3 meses). Fase pelo limiar ±0,5 °C; intensidade: fraco < 1,0 ≤ moderado < 1,5 ≤ forte < 2,0 ≤ muito forte. Índice global (vale para qualquer cidade).
 
 # COMMAND ----------
@@ -480,7 +534,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Precipitação por Mês (média 1991–2020)
+# MAGIC ## 9. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -512,7 +566,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Temperatura por Mês (média 1991–2020)
+# MAGIC ## 10. Temperatura por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -544,7 +598,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 10. Tendência Anual de Temperatura (anos completos)
+# MAGIC ## 11. Tendência Anual de Temperatura (anos completos)
 # MAGIC > O ano corrente fica de fora: sem nov/dez, ele puxaria a média para baixo.
 
 # COMMAND ----------

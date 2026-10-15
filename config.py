@@ -8,6 +8,8 @@
 LAT     = -21.2878
 LON     = -50.3409
 CIDADE  = "Birigui-SP"
+CIDADE_IBGE = "3506508"   # código IBGE do município (avisos do INMET são por município)
+UF      = "SP"
 TIMEZONE = "America/Sao_Paulo"
 
 # Paths
