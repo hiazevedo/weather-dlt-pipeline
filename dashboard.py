@@ -2,7 +2,7 @@
 # MAGIC %md
 # MAGIC # Dashboard — Previsão de Chuva · Birigui SP
 # MAGIC > Espelho das queries do dashboard Lakeview **Previsão de Chuva · Birigui**.
-# MAGIC > Série histórica 1940→hoje (Open-Meteo/ERA5) + modelo `workspace.default.rain-forecast-birigui@champion` + API Open-Meteo.
+# MAGIC > Série histórica 1940→hoje (Open-Meteo) + champion `workspace.default.rain-forecast-birigui@champion` (rótulo Open-Meteo) + regional `workspace.default.rain-forecast-regional-inmet@champion` (chuva medida pelo INMET) + API Open-Meteo + ENSO (NOAA).
 # MAGIC > `observation_time`/`target_time` estão na hora local (America/Sao_Paulo) sem fuso; por isso "agora" é `from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')`.
 
 # COMMAND ----------
@@ -13,7 +13,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC #### Vai chover na próxima hora? (modelo)
+# MAGIC #### Vai chover na próxima hora? — champion (prevê o rótulo do Open-Meteo)
 
 # COMMAND ----------
 
@@ -33,7 +33,29 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC #### Chuva prevista — próxima hora (API, mm)
+# MAGIC #### Chuva medida na próxima hora? — modelo regional (treinado com o pluviômetro do INMET)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT CONCAT(
+# MAGIC   CASE WHEN prob_chuva_medida IS NULL THEN '⚪ '
+# MAGIC        WHEN prob_chuva_medida >= 0.9 THEN '🔴 '
+# MAGIC        WHEN prob_chuva_medida >= threshold_regional THEN '🟠 '
+# MAGIC        WHEN prob_chuva_medida >= threshold_regional - 0.2 THEN '🟡 '
+# MAGIC        ELSE '🟢 ' END,
+# MAGIC   COALESCE(CONCAT(CAST(ROUND(prob_chuva_medida * 100) AS INT), '% às ',
+# MAGIC                   LPAD(CAST(HOUR(target_time) AS STRING), 2, '0'), 'h'), 'indisponível')) AS `Chuva medida`
+# MAGIC FROM weather_pipeline.gold.rain_forecast_ml
+# MAGIC WHERE target_time = (
+# MAGIC   SELECT MIN(target_time) FROM weather_pipeline.gold.rain_forecast_ml
+# MAGIC   WHERE target_time > from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')
+# MAGIC )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Chuva prevista — próxima hora (API Open-Meteo, mm)
 
 # COMMAND ----------
 
@@ -45,6 +67,37 @@
 # MAGIC   SELECT MIN(observation_time)
 # MAGIC   FROM weather_pipeline.gold.weather_today
 # MAGIC   WHERE is_past = false
+# MAGIC )
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Temperatura máxima / mínima do dia
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT CONCAT(
+# MAGIC   REPLACE(CAST(ROUND(MAX(CAST(temperature_2m AS DOUBLE)), 1) AS STRING), '.', ','), '° / ',
+# MAGIC   REPLACE(CAST(ROUND(MIN(CAST(temperature_2m AS DOUBLE)), 1) AS STRING), '.', ','), '°') AS `Máx / Mín`
+# MAGIC FROM weather_pipeline.gold.weather_today
+# MAGIC WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### Umidade atual
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC   ROUND(CAST(relative_humidity AS DOUBLE), 0) AS `Umidade (%)`
+# MAGIC FROM weather_pipeline.gold.weather_today
+# MAGIC WHERE observation_time = (
+# MAGIC   SELECT MAX(observation_time)
+# MAGIC   FROM weather_pipeline.gold.weather_today
+# MAGIC   WHERE is_past = true
 # MAGIC )
 
 # COMMAND ----------
@@ -108,51 +161,8 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC #### Temperatura máxima do dia
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   ROUND(MAX(CAST(temperature_2m AS DOUBLE)), 1) AS `Temp Máxima (°C)`
-# MAGIC FROM weather_pipeline.gold.weather_today
-# MAGIC WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC #### Temperatura mínima do dia
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   ROUND(MIN(CAST(temperature_2m AS DOUBLE)), 1) AS `Temp Mínima (°C)`
-# MAGIC FROM weather_pipeline.gold.weather_today
-# MAGIC WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC #### Umidade atual
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   ROUND(CAST(relative_humidity AS DOUBLE), 0) AS `Umidade (%)`
-# MAGIC FROM weather_pipeline.gold.weather_today
-# MAGIC WHERE observation_time = (
-# MAGIC   SELECT MAX(observation_time)
-# MAGIC   FROM weather_pipeline.gold.weather_today
-# MAGIC   WHERE is_past = true
-# MAGIC )
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## 2. Modelo vs Realidade (−6h a +18h)
-# MAGIC > Probabilidade do modelo para cada hora-alvo × chuva observada. `horas_rel` = horas em relação à hora atual; o modelo usa as features da hora t para prever t+1.
+# MAGIC > Probabilidade do champion e do regional para cada hora-alvo × chuva observada. `horas_rel` = horas em relação à hora atual; os modelos usam as features da hora t para prever t+1.
 
 # COMMAND ----------
 
@@ -168,6 +178,7 @@
 # MAGIC   CAST((unix_timestamp(u.target_time) - unix_timestamp(date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')))) / 3600 AS INT) AS horas_rel,
 # MAGIC   HOUR(u.target_time)                                    AS hora,
 # MAGIC   ROUND(u.prob_chuva * 100, 1)                           AS prob_modelo_pct,
+# MAGIC   ROUND(u.prob_chuva_medida * 100, 1)                    AS prob_regional_pct,
 # MAGIC   u.threshold_usado * 100                                AS threshold_pct,
 # MAGIC   CASE WHEN o.precipitation > 0 THEN 100
 # MAGIC        WHEN o.precipitation = 0 THEN 0 END               AS choveu_real,
@@ -181,25 +192,8 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Temperatura de hoje vs média histórica
-# MAGIC > Por hora: observado + previsão de hoje × média 1991–2020 numa janela de ±7 dias em torno da data
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC SELECT
-# MAGIC   hour                                          AS hora,
-# MAGIC   ROUND(CAST(temperature_2m AS DOUBLE), 1)      AS temperatura,
-# MAGIC   ROUND(temp_climatologica, 1)                  AS normal
-# MAGIC FROM weather_pipeline.gold.weather_today
-# MAGIC WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))
-# MAGIC ORDER BY hour
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Desempenho — produção, API, teste e chuva medida (INMET)
-# MAGIC > **Produção**: horas com chuva observada em que existem previsão do modelo e da API (mesmas horas). **API**: baseline "a Open-Meteo prevê > 0 mm". **Teste**: últimos 12 meses fora do treino, no limiar do champion (os 12 meses anteriores calibram o limiar). **INMET**: champion contra a chuva medida nas cidades das estações (média, últimos 12 meses; validação semanal), com a persistência do pluviômetro como referência. Com menos de 48 h observadas a amostra de produção é pequena.
+# MAGIC ## 3. Desempenho
+# MAGIC > **Champion** (rótulo Open-Meteo): produção (horas observadas, mesmas horas da API), API Open-Meteo como baseline e teste de 12 meses no limiar do champion. **Chuva medida (INMET)**: champion nas cidades das estações (validação semanal) e regional avaliado deixando cada estação de fora (como Birigui, que não tem estação), com a persistência do pluviômetro como referência.
 
 # COMMAND ----------
 
@@ -250,6 +244,13 @@
 # MAGIC     AND created_at = (SELECT max(created_at) FROM weather_pipeline.gold.ml_experiments
 # MAGIC                       WHERE experimento = 'inmet_validacao')
 # MAGIC ),
+# MAGIC reg AS (
+# MAGIC   -- champion regional (rótulo = chuva medida): avaliação deixando cada estação de fora
+# MAGIC   SELECT version AS r_ver, threshold AS r_thr, f1 AS r_f1, `precision` AS r_prec, recall AS r_rec,
+# MAGIC          accuracy AS r_acc, test_size AS r_n
+# MAGIC   FROM weather_pipeline.gold.rain_regional_versions
+# MAGIC   WHERE promoted ORDER BY version DESC LIMIT 1
+# MAGIC ),
 # MAGIC champ AS (
 # MAGIC   SELECT * FROM weather_pipeline.gold.rain_model_versions
 # MAGIC   WHERE promoted ORDER BY version DESC LIMIT 1
@@ -262,24 +263,26 @@
 # MAGIC     a.acc AS a_acc, a.prec AS a_prec, a.rec AS a_rec, a.f1 AS a_f1,
 # MAGIC     c.version AS ver, c.threshold AS v_thr, c.test_size AS v_n,
 # MAGIC     c.accuracy AS v_acc, c.precision AS v_prec, c.recall AS v_rec, c.f1 AS v_f1
-# MAGIC   , i.*
+# MAGIC   , i.*, r.*
 # MAGIC   FROM met m
 # MAGIC   JOIN met a ON m.src = 'modelo' AND a.src = 'api'
 # MAGIC   CROSS JOIN champ c
 # MAGIC   CROSS JOIN inmet i
+# MAGIC   CROSS JOIN reg r
 # MAGIC )
 # MAGIC SELECT 1 AS ord, 'Observações (horas)' AS `Métrica`,
 # MAGIC        CAST(n AS STRING) AS `Modelo (produção)`,
 # MAGIC        CAST(n AS STRING) AS `API Open-Meteo (produção)`,
 # MAGIC        CAST(v_n AS STRING) AS `Modelo (teste 12 meses)`,
-# MAGIC        CONCAT(i_n, ' (', i_cidades, ' cidades)') AS `Modelo vs chuva medida (INMET)` FROM f
-# MAGIC UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END, CASE WHEN i_acc IS NULL THEN '—' ELSE CONCAT(ROUND(i_acc * 100, 1), '%') END FROM f
-# MAGIC UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END, CASE WHEN i_prec IS NULL THEN '—' ELSE CONCAT(ROUND(i_prec * 100, 1), '%') END FROM f
-# MAGIC UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END , CASE WHEN i_rec IS NULL THEN '—' ELSE CONCAT(ROUND(i_rec * 100, 1), '%') END FROM f
-# MAGIC UNION ALL SELECT 5, 'F1',       CASE WHEN m_f1 IS NULL THEN '—' ELSE CAST(ROUND(m_f1, 3) AS STRING) END,   CASE WHEN a_f1 IS NULL THEN '—' ELSE CAST(ROUND(a_f1, 3) AS STRING) END,   CASE WHEN v_f1 IS NULL THEN '—' ELSE CAST(ROUND(v_f1, 3) AS STRING) END  , CASE WHEN i_f1 IS NULL THEN '—' ELSE CAST(ROUND(i_f1, 3) AS STRING) END FROM f
+# MAGIC        CONCAT(i_n, ' (', i_cidades, ' cidades)') AS `Modelo vs chuva medida (INMET)`,
+# MAGIC        CONCAT(r_n, ' (estação fora do treino)') AS `Regional vs chuva medida (INMET)` FROM f
+# MAGIC UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END, CASE WHEN i_acc IS NULL THEN '—' ELSE CONCAT(ROUND(i_acc * 100, 1), '%') END, CASE WHEN r_acc IS NULL THEN '—' ELSE CONCAT(ROUND(r_acc * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END, CASE WHEN i_prec IS NULL THEN '—' ELSE CONCAT(ROUND(i_prec * 100, 1), '%') END, CASE WHEN r_prec IS NULL THEN '—' ELSE CONCAT(ROUND(r_prec * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END , CASE WHEN i_rec IS NULL THEN '—' ELSE CONCAT(ROUND(i_rec * 100, 1), '%') END, CASE WHEN r_rec IS NULL THEN '—' ELSE CONCAT(ROUND(r_rec * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 5, 'F1',       CASE WHEN m_f1 IS NULL THEN '—' ELSE CAST(ROUND(m_f1, 3) AS STRING) END,   CASE WHEN a_f1 IS NULL THEN '—' ELSE CAST(ROUND(a_f1, 3) AS STRING) END,   CASE WHEN v_f1 IS NULL THEN '—' ELSE CAST(ROUND(v_f1, 3) AS STRING) END  , CASE WHEN i_f1 IS NULL THEN '—' ELSE CAST(ROUND(i_f1, 3) AS STRING) END, CASE WHEN r_f1 IS NULL THEN '—' ELSE CAST(ROUND(r_f1, 3) AS STRING) END FROM f
 # MAGIC UNION ALL SELECT 6, 'VP / VN / FP / FN',
 # MAGIC        CONCAT(m_vp, ' / ', m_vn, ' / ', m_fp, ' / ', m_fn),
-# MAGIC        CONCAT(a_vp, ' / ', a_vn, ' / ', a_fp, ' / ', a_fn), '—', '—' FROM f
+# MAGIC        CONCAT(a_vp, ' / ', a_vn, ' / ', a_fp, ' / ', a_fn), '—', '—', '—' FROM f
 # MAGIC UNION ALL SELECT 7, 'Diagnóstico',
 # MAGIC        CASE
 # MAGIC          WHEN n < 48 THEN CONCAT('⏳ Amostra pequena (', n, ' h)')
@@ -298,14 +301,21 @@
 # MAGIC          WHEN i_f1 IS NULL THEN '—'
 # MAGIC          WHEN i_f1 >= p_f1 THEN CONCAT('✅ Supera a persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')
 # MAGIC          ELSE CONCAT('⚠️ Abaixo da persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')
+# MAGIC        END,
+# MAGIC        CASE
+# MAGIC          WHEN r_f1 IS NULL THEN '—'
+# MAGIC          WHEN i_f1 IS NULL THEN CONCAT('v', r_ver, ' · limiar ', REPLACE(CAST(r_thr AS STRING), '.', ','))
+# MAGIC          ELSE CONCAT(CASE WHEN r_f1 >= i_f1 THEN '✅ +' ELSE '⚠️ ' END,
+# MAGIC                      ROUND(r_f1 - i_f1, 2), ' de F1 vs champion · v', r_ver,
+# MAGIC                      ' · limiar ', REPLACE(CAST(r_thr AS STRING), '.', ','))
 # MAGIC        END FROM f
 # MAGIC ORDER BY ord
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4b. Acurácia por antecedência (produção)
-# MAGIC > Todas as previsões do histórico (cada hora-alvo é prevista por até 4 rodadas, com antecedências diferentes) × chuva observada, só do champion atual. View `gold.rain_model_accuracy_by_lead`, criada pelo 05_batch_inference.
+# MAGIC ## 4. Acurácia por antecedência (produção)
+# MAGIC > Todas as previsões do histórico (cada hora-alvo é prevista por até 4 rodadas) × chuva observada, só do champion atual. View `gold.rain_model_accuracy_by_lead`.
 
 # COMMAND ----------
 
@@ -348,16 +358,32 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Resumo de Alertas — hoje e amanhã
-# MAGIC > Uma linha por hora (observado + previsão). **Diferença p/ média histórica**: temperatura da hora − média 1991–2020 da mesma hora (janela de ±7 dias em torno da data; 🔴 ≥ +2 °C, 🔵 ≤ −2 °C).
-# MAGIC > **Faixa de temperatura** é a classe da temperatura do ar. **Modelo**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
+# MAGIC ## 5. Temperatura de hoje vs média histórica
+# MAGIC > Por hora: observado + previsão de hoje × média 1991–2020 numa janela de ±7 dias em torno da data.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC SELECT
+# MAGIC   hour                                          AS hora,
+# MAGIC   ROUND(CAST(temperature_2m AS DOUBLE), 1)      AS temperatura,
+# MAGIC   ROUND(temp_climatologica, 1)                  AS normal
+# MAGIC FROM weather_pipeline.gold.weather_today
+# MAGIC WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))
+# MAGIC ORDER BY hour
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. Resumo de Alertas — hoje e amanhã
+# MAGIC > Uma linha por hora (observado + previsão). **Diferença p/ média histórica**: temperatura da hora − média 1991–2020 da mesma hora (±7 dias; 🔴 ≥ +2 °C, 🔵 ≤ −2 °C). **Modelo** e **Regional**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC WITH modelo AS (
 # MAGIC   -- última previsão feita antes de cada hora-alvo (mesma regra da view de acurácia)
-# MAGIC   SELECT target_time, prob_chuva,
+# MAGIC   SELECT target_time, prob_chuva, prob_chuva_medida, threshold_regional,
 # MAGIC          ROW_NUMBER() OVER (PARTITION BY target_time ORDER BY inferencia_local DESC) AS rn
 # MAGIC   FROM weather_pipeline.gold.rain_forecast_ml_history
 # MAGIC   WHERE inferencia_local < target_time
@@ -392,7 +418,16 @@
 # MAGIC            WHEN m.prob_chuva >= 0.40 THEN '🟡 '
 # MAGIC            ELSE '🟢 ' END,
 # MAGIC       CAST(ROUND(m.prob_chuva * 100) AS INT), '%')
-# MAGIC   END                                                               AS `Modelo (chance de chuva)`
+# MAGIC   END                                                               AS `Modelo (chance de chuva)`,
+# MAGIC   CASE
+# MAGIC     WHEN m.prob_chuva_medida IS NULL THEN '—'
+# MAGIC     ELSE CONCAT(
+# MAGIC       CASE WHEN m.prob_chuva_medida >= 0.9 THEN '🔴 '
+# MAGIC            WHEN m.prob_chuva_medida >= m.threshold_regional THEN '🟠 '
+# MAGIC            WHEN m.prob_chuva_medida >= m.threshold_regional - 0.2 THEN '🟡 '
+# MAGIC            ELSE '🟢 ' END,
+# MAGIC       CAST(ROUND(m.prob_chuva_medida * 100) AS INT), '%')
+# MAGIC   END                                                               AS `Regional (chuva medida)`
 # MAGIC FROM weather_pipeline.gold.weather_today wt
 # MAGIC LEFT JOIN modelo m
 # MAGIC   ON m.target_time = wt.observation_time AND m.rn = 1
@@ -401,9 +436,8 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. ENSO — El Niño / La Niña (NOAA CPC)
-# MAGIC > Índice ONI: anomalia da temperatura do mar no Niño 3.4 (média de 3 meses). Fase pelo limiar ±0,5 °C; intensidade: fraco < 1,0 ≤ moderado < 1,5 ≤ forte < 2,0 ≤ muito forte.
-# MAGIC > Índice global (vale para qualquer cidade). Tabela `weather_pipeline.silver.enso_oni`, atualizada pelo job semanal.
+# MAGIC ## 7. ENSO — El Niño / La Niña (NOAA CPC)
+# MAGIC > Índice ONI: anomalia da temperatura do mar no Niño 3.4 (média de 3 meses). Fase pelo limiar ±0,5 °C; intensidade: fraco < 1,0 ≤ moderado < 1,5 ≤ forte < 2,0 ≤ muito forte. Índice global (vale para qualquer cidade).
 
 # COMMAND ----------
 
@@ -446,7 +480,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Precipitação por Mês (média 1991–2020)
+# MAGIC ## 8. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -478,7 +512,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Temperatura por Mês (média 1991–2020)
+# MAGIC ## 9. Temperatura por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -510,7 +544,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9. Tendência Anual de Temperatura (anos completos)
+# MAGIC ## 10. Tendência Anual de Temperatura (anos completos)
 # MAGIC > O ano corrente fica de fora: sem nov/dez, ele puxaria a média para baixo.
 
 # COMMAND ----------
