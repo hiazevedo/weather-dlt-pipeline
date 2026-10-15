@@ -198,14 +198,15 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Desempenho — modelo vs API vs teste
-# MAGIC > **Produção**: horas com chuva observada em que existem previsão do modelo e da API (mesmas horas). **API**: baseline "a Open-Meteo prevê > 0 mm". **Teste**: últimos 12 meses fora do treino, no limiar do champion (os 12 meses anteriores calibram o limiar). Com menos de 48 h observadas a amostra é pequena.
+# MAGIC ## 4. Desempenho — produção, API, teste e chuva medida (INMET)
+# MAGIC > **Produção**: horas com chuva observada em que existem previsão do modelo e da API (mesmas horas). **API**: baseline "a Open-Meteo prevê > 0 mm". **Teste**: últimos 12 meses fora do treino, no limiar do champion (os 12 meses anteriores calibram o limiar). **INMET**: champion contra a chuva medida nas cidades das estações (média, últimos 12 meses; validação semanal), com a persistência do pluviômetro como referência. Com menos de 48 h observadas a amostra de produção é pequena.
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC -- Produção: horas com chuva observada em que há previsão do modelo E da API
 # MAGIC -- (mesmas horas para os dois). Teste: últimos 12 meses fora do treino, no limiar do champion.
+# MAGIC -- INMET: champion contra chuva medida nas cidades das estações (validação semanal).
 # MAGIC WITH base AS (
 # MAGIC   SELECT pred_vai_chover, api_vai_chover, choveu FROM weather_pipeline.gold.rain_model_accuracy_hourly
 # MAGIC   WHERE api_precip_alvo IS NOT NULL
@@ -234,6 +235,21 @@
 # MAGIC   FROM (VALUES ('modelo'), ('api')) AS s(src)
 # MAGIC   LEFT JOIN agg a ON a.src = s.src
 # MAGIC ),
+# MAGIC inmet AS (
+# MAGIC   -- última validação semanal do champion contra a chuva MEDIDA (INMET),
+# MAGIC   -- média das cidades das estações, últimos 12 meses com dado
+# MAGIC   SELECT avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN f1 END)            AS i_f1,
+# MAGIC          avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN `precision` END)   AS i_prec,
+# MAGIC          avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN recall END)        AS i_rec,
+# MAGIC          avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN accuracy END)      AS i_acc,
+# MAGIC          sum(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN test_size END)     AS i_n,
+# MAGIC          count(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN 1 END)          AS i_cidades,
+# MAGIC          avg(CASE WHEN variante LIKE '%_persistencia_inmet%' THEN f1 END)           AS p_f1
+# MAGIC   FROM weather_pipeline.gold.ml_experiments
+# MAGIC   WHERE experimento = 'inmet_validacao'
+# MAGIC     AND created_at = (SELECT max(created_at) FROM weather_pipeline.gold.ml_experiments
+# MAGIC                       WHERE experimento = 'inmet_validacao')
+# MAGIC ),
 # MAGIC champ AS (
 # MAGIC   SELECT * FROM weather_pipeline.gold.rain_model_versions
 # MAGIC   WHERE promoted ORDER BY version DESC LIMIT 1
@@ -246,21 +262,24 @@
 # MAGIC     a.acc AS a_acc, a.prec AS a_prec, a.rec AS a_rec, a.f1 AS a_f1,
 # MAGIC     c.version AS ver, c.threshold AS v_thr, c.test_size AS v_n,
 # MAGIC     c.accuracy AS v_acc, c.precision AS v_prec, c.recall AS v_rec, c.f1 AS v_f1
+# MAGIC   , i.*
 # MAGIC   FROM met m
 # MAGIC   JOIN met a ON m.src = 'modelo' AND a.src = 'api'
 # MAGIC   CROSS JOIN champ c
+# MAGIC   CROSS JOIN inmet i
 # MAGIC )
 # MAGIC SELECT 1 AS ord, 'Observações (horas)' AS `Métrica`,
 # MAGIC        CAST(n AS STRING) AS `Modelo (produção)`,
 # MAGIC        CAST(n AS STRING) AS `API Open-Meteo (produção)`,
-# MAGIC        CAST(v_n AS STRING) AS `Modelo (teste 12 meses)` FROM f
-# MAGIC UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END FROM f
-# MAGIC UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END FROM f
-# MAGIC UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END  FROM f
-# MAGIC UNION ALL SELECT 5, 'F1',       CASE WHEN m_f1 IS NULL THEN '—' ELSE CAST(ROUND(m_f1, 3) AS STRING) END,   CASE WHEN a_f1 IS NULL THEN '—' ELSE CAST(ROUND(a_f1, 3) AS STRING) END,   CASE WHEN v_f1 IS NULL THEN '—' ELSE CAST(ROUND(v_f1, 3) AS STRING) END   FROM f
+# MAGIC        CAST(v_n AS STRING) AS `Modelo (teste 12 meses)`,
+# MAGIC        CONCAT(i_n, ' (', i_cidades, ' cidades)') AS `Modelo vs chuva medida (INMET)` FROM f
+# MAGIC UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END, CASE WHEN i_acc IS NULL THEN '—' ELSE CONCAT(ROUND(i_acc * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END, CASE WHEN i_prec IS NULL THEN '—' ELSE CONCAT(ROUND(i_prec * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END , CASE WHEN i_rec IS NULL THEN '—' ELSE CONCAT(ROUND(i_rec * 100, 1), '%') END FROM f
+# MAGIC UNION ALL SELECT 5, 'F1',       CASE WHEN m_f1 IS NULL THEN '—' ELSE CAST(ROUND(m_f1, 3) AS STRING) END,   CASE WHEN a_f1 IS NULL THEN '—' ELSE CAST(ROUND(a_f1, 3) AS STRING) END,   CASE WHEN v_f1 IS NULL THEN '—' ELSE CAST(ROUND(v_f1, 3) AS STRING) END  , CASE WHEN i_f1 IS NULL THEN '—' ELSE CAST(ROUND(i_f1, 3) AS STRING) END FROM f
 # MAGIC UNION ALL SELECT 6, 'VP / VN / FP / FN',
 # MAGIC        CONCAT(m_vp, ' / ', m_vn, ' / ', m_fp, ' / ', m_fn),
-# MAGIC        CONCAT(a_vp, ' / ', a_vn, ' / ', a_fp, ' / ', a_fn), '—' FROM f
+# MAGIC        CONCAT(a_vp, ' / ', a_vn, ' / ', a_fp, ' / ', a_fn), '—', '—' FROM f
 # MAGIC UNION ALL SELECT 7, 'Diagnóstico',
 # MAGIC        CASE
 # MAGIC          WHEN n < 48 THEN CONCAT('⏳ Amostra pequena (', n, ' h)')
@@ -274,7 +293,12 @@
 # MAGIC          WHEN COALESCE(m_f1, 0) < COALESCE(a_f1, 0) - 0.02 THEN '⚠️ API supera o modelo'
 # MAGIC          ELSE '≈ Empate com a API'
 # MAGIC        END,
-# MAGIC        CONCAT('v', ver, ' · limiar ', REPLACE(CAST(v_thr AS STRING), '.', ',')) FROM f
+# MAGIC        CONCAT('v', ver, ' · limiar ', REPLACE(CAST(v_thr AS STRING), '.', ',')),
+# MAGIC        CASE
+# MAGIC          WHEN i_f1 IS NULL THEN '—'
+# MAGIC          WHEN i_f1 >= p_f1 THEN CONCAT('✅ Supera a persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')
+# MAGIC          ELSE CONCAT('⚠️ Abaixo da persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')
+# MAGIC        END FROM f
 # MAGIC ORDER BY ord
 
 # COMMAND ----------

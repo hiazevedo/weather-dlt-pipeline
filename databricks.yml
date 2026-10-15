@@ -128,6 +128,16 @@ resources:
             notebook_path: ${workspace.file_path}/10_ingest_inmet
             source: WORKSPACE
 
+        # Champion × chuva medida nas cidades das estações do INMET (dashboard)
+        - task_key: validate_inmet
+          max_retries: 1
+          description: "Atualiza gold.era5_vs_inmet e a validação do champion contra o INMET"
+          depends_on:
+            - task_key: ingest_inmet
+          notebook_task:
+            notebook_path: /Workspace/Users/higor_com@hotmail.com/.bundle/weather-ml-rain-forecast/dev/files/11_experiment_inmet_validacao
+            source: WORKSPACE
+
         - task_key: backfill_archive
           max_retries: 2
           min_retry_interval_millis: 300000
