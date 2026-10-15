@@ -227,7 +227,7 @@ def weather_forecast():
         .select(
             "observation_time", "cidade",
             "temperature_2m", "apparent_temperature",
-            "precipitation", "rain", "relative_humidity",
+            "precipitation", "rain", "relative_humidity", "windspeed",
             "temp_class", "rain_class",
             "year", "month", "day", "hour",
             "_ingested_at"
