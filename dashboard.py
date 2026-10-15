@@ -304,6 +304,50 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## 4b. Acurácia por antecedência (produção)
+# MAGIC > Todas as previsões do histórico (cada hora-alvo é prevista por até 4 rodadas, com antecedências diferentes) × chuva observada, só do champion atual. View `gold.rain_model_accuracy_by_lead`, criada pelo 05_batch_inference.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Acurácia por antecedência (produção, champion atual): todas as previsões do
+# MAGIC -- histórico × chuva observada; ⏳ enquanto a faixa tiver menos de 48 horas avaliadas
+# MAGIC WITH atual AS (
+# MAGIC   SELECT max_by(modelo, inferencia_local) AS modelo FROM weather_pipeline.gold.rain_forecast_ml_history
+# MAGIC ),
+# MAGIC b AS (
+# MAGIC   SELECT l.* FROM weather_pipeline.gold.rain_model_accuracy_by_lead l JOIN atual a ON l.modelo = a.modelo
+# MAGIC ),
+# MAGIC faixas AS (SELECT explode(array('01–06 h', '07–12 h', '13–18 h', '19–24 h')) AS faixa_antecedencia),
+# MAGIC agg AS (
+# MAGIC   SELECT faixa_antecedencia, count(*) AS n,
+# MAGIC     sum(CASE WHEN pred_vai_chover = 1 AND choveu = 1 THEN 1 ELSE 0 END) AS vp,
+# MAGIC     sum(CASE WHEN pred_vai_chover = 1 AND choveu = 0 THEN 1 ELSE 0 END) AS fp,
+# MAGIC     sum(CASE WHEN pred_vai_chover = 0 AND choveu = 1 THEN 1 ELSE 0 END) AS fn,
+# MAGIC     sum(CASE WHEN api_vai_chover = 1 AND choveu = 1 THEN 1 ELSE 0 END)  AS avp,
+# MAGIC     sum(CASE WHEN api_vai_chover = 1 AND choveu = 0 THEN 1 ELSE 0 END)  AS afp,
+# MAGIC     sum(CASE WHEN api_vai_chover = 0 AND choveu = 1 THEN 1 ELSE 0 END)  AS afn
+# MAGIC   FROM b GROUP BY faixa_antecedencia
+# MAGIC )
+# MAGIC SELECT
+# MAGIC   f.faixa_antecedencia                                              AS `Antecedência`,
+# MAGIC   COALESCE(n, 0)                                                    AS `Horas avaliadas`,
+# MAGIC   CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'
+# MAGIC        ELSE COALESCE(CAST(ROUND(2 * vp / NULLIF(2 * vp + fp + fn, 0), 3) AS STRING), '—') END   AS `F1 modelo`,
+# MAGIC   CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'
+# MAGIC        ELSE COALESCE(CAST(ROUND(2 * avp / NULLIF(2 * avp + afp + afn, 0), 3) AS STRING), '—') END AS `F1 API Open-Meteo`,
+# MAGIC   CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'
+# MAGIC        ELSE COALESCE(CONCAT(ROUND(vp * 100 / NULLIF(vp + fp, 0), 1), '%'), '—') END             AS `Precisão modelo`,
+# MAGIC   CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'
+# MAGIC        ELSE COALESCE(CONCAT(ROUND(vp * 100 / NULLIF(vp + fn, 0), 1), '%'), '—') END             AS `Recall modelo`,
+# MAGIC   (SELECT modelo FROM atual)                                        AS `Modelo`
+# MAGIC FROM faixas f
+# MAGIC LEFT JOIN agg a ON a.faixa_antecedencia = f.faixa_antecedencia
+# MAGIC ORDER BY f.faixa_antecedencia
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 5. Resumo de Alertas — hoje e amanhã
 # MAGIC > Uma linha por hora (observado + previsão). **Diferença p/ média histórica**: temperatura da hora − média 1991–2020 da mesma hora (janela de ±7 dias em torno da data; 🔴 ≥ +2 °C, 🔵 ≤ −2 °C).
 # MAGIC > **Faixa de temperatura** é a classe da temperatura do ar. **Modelo**: última previsão feita antes da hora (histórico em `rain_forecast_ml_history`).
