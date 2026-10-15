@@ -21,6 +21,16 @@ hourly_schema = StructType([
     StructField("rain",                  ArrayType(FloatType()),   True),
     StructField("relative_humidity_2m",  ArrayType(FloatType()),   True),
     StructField("windspeed_10m",         ArrayType(FloatType()),   True),
+    # variáveis extras (arquivos antigos não têm → null)
+    StructField("dew_point_2m",          ArrayType(FloatType()),   True),
+    StructField("pressure_msl",          ArrayType(FloatType()),   True),
+    StructField("cloud_cover",           ArrayType(FloatType()),   True),
+    StructField("cloud_cover_low",       ArrayType(FloatType()),   True),
+    StructField("cloud_cover_mid",       ArrayType(FloatType()),   True),
+    StructField("cloud_cover_high",      ArrayType(FloatType()),   True),
+    StructField("wind_direction_10m",    ArrayType(FloatType()),   True),
+    StructField("total_column_integrated_water_vapour", ArrayType(FloatType()), True),
+    StructField("boundary_layer_height", ArrayType(FloatType()),   True),
 ])
 data_schema = StructType([
     StructField("hourly", hourly_schema, True),
@@ -94,6 +104,15 @@ def weather_clean():
             F.col("data.hourly.relative_humidity_2m")[F.col("idx")])
         .withColumn("windspeed",
             F.col("data.hourly.windspeed_10m")[F.col("idx")])
+        .withColumn("dew_point_2m",       F.col("data.hourly.dew_point_2m")[F.col("idx")])
+        .withColumn("pressure_msl",       F.col("data.hourly.pressure_msl")[F.col("idx")])
+        .withColumn("cloud_cover",        F.col("data.hourly.cloud_cover")[F.col("idx")])
+        .withColumn("cloud_cover_low",    F.col("data.hourly.cloud_cover_low")[F.col("idx")])
+        .withColumn("cloud_cover_mid",    F.col("data.hourly.cloud_cover_mid")[F.col("idx")])
+        .withColumn("cloud_cover_high",   F.col("data.hourly.cloud_cover_high")[F.col("idx")])
+        .withColumn("wind_direction_10m", F.col("data.hourly.wind_direction_10m")[F.col("idx")])
+        .withColumn("tcwv",               F.col("data.hourly.total_column_integrated_water_vapour")[F.col("idx")])
+        .withColumn("boundary_layer_height", F.col("data.hourly.boundary_layer_height")[F.col("idx")])
 
         # Filtra linhas sem precipitation válido
         .filter(~F.isnan(F.col("precipitation")) & F.col("precipitation").isNotNull())
@@ -140,6 +159,9 @@ def weather_clean():
             "observation_time", "cidade", "latitude", "longitude",
             "temperature_2m", "apparent_temperature",
             "precipitation", "rain", "relative_humidity", "windspeed",
+            "dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover_low",
+            "cloud_cover_mid", "cloud_cover_high", "wind_direction_10m", "tcwv",
+            "boundary_layer_height",
             "temp_class", "rain_class", "is_forecast",
             "year", "month", "day", "hour", "weekday", "quarter",
             "_source_file", "_ingested_at"
@@ -228,6 +250,9 @@ def weather_forecast():
             "observation_time", "cidade",
             "temperature_2m", "apparent_temperature",
             "precipitation", "rain", "relative_humidity", "windspeed",
+            "dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover_low",
+            "cloud_cover_mid", "cloud_cover_high", "wind_direction_10m", "tcwv",
+            "boundary_layer_height",
             "temp_class", "rain_class",
             "year", "month", "day", "hour",
             "_ingested_at"

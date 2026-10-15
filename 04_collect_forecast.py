@@ -21,14 +21,7 @@ try:
         params={
             "latitude":      LAT,
             "longitude":     LON,
-            "hourly":        ",".join([
-                "temperature_2m",
-                "apparent_temperature",
-                "precipitation",
-                "rain",
-                "relative_humidity_2m",
-                "windspeed_10m"
-            ]),
+            "hourly":        ",".join(HOURLY_VARS),
             "daily": ",".join([
                 "temperature_2m_max",
                 "temperature_2m_min",

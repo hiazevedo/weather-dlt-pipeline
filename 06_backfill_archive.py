@@ -31,7 +31,7 @@ print(f"   Anos  : {anos}\n")
 # COMMAND ----------
 
 def fetch_archive(start: str, end: str) -> dict:
-    """Dados horários da Open-Meteo Archive API (mesmas variáveis do 01_collect_history)."""
+    """Dados horários da Open-Meteo Archive API (HOURLY_VARS do config, modelo ARCHIVE_MODEL)."""
     resp = requests.get(
         "https://archive-api.open-meteo.com/v1/archive",
         params={
@@ -39,15 +39,9 @@ def fetch_archive(start: str, end: str) -> dict:
             "longitude":  LON,
             "start_date": start,
             "end_date":   end,
-            "hourly":     ",".join([
-                "temperature_2m",
-                "apparent_temperature",
-                "precipitation",
-                "rain",
-                "relative_humidity_2m",
-                "windspeed_10m"
-            ]),
-            "timezone":   TIMEZONE
+            "hourly":     ",".join(HOURLY_VARS),
+            "timezone":   TIMEZONE,
+            "models":     ARCHIVE_MODEL,
         },
         timeout=API_TIMEOUT * 4
     )

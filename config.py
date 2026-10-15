@@ -45,6 +45,23 @@ TEMP_ALERT     = 25.0
 
 # COMMAND ----------
 
+# Variáveis horárias coletadas (Archive e Forecast usam os mesmos nomes).
+# As extras (orvalho, pressão, nuvens por camada, direção do vento, vapor
+# d'água na coluna, camada limite) melhoraram o modelo — experimento
+# 08_experiment_extra_features do bundle de ML.
+HOURLY_VARS_BASE  = ["temperature_2m", "apparent_temperature", "precipitation", "rain",
+                     "relative_humidity_2m", "windspeed_10m"]
+HOURLY_VARS_EXTRA = ["dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover_low",
+                     "cloud_cover_mid", "cloud_cover_high", "wind_direction_10m",
+                     "total_column_integrated_water_vapour", "boundary_layer_height"]
+HOURLY_VARS = HOURLY_VARS_BASE + HOURLY_VARS_EXTRA
+
+# Modelo do Archive para a série histórica: "best_match" (ERA5 até 2017 e
+# IFS a partir de 2018) ou "era5" (fonte única) — ver 10_experiment_fonte_historica
+ARCHIVE_MODEL = "best_match"
+
+# COMMAND ----------
+
 # Configurações de API
 API_TIMEOUT   = 30   # segundos
 API_DELAY_SEG =  2   # delay entre chamadas (rate limit Open-Meteo)

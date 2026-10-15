@@ -28,17 +28,11 @@ def fetch_historical(start: str, end: str) -> dict:
             "longitude":            LON,
             "start_date":           start,
             "end_date":             end,
-            "hourly":               ",".join([
-                "temperature_2m",
-                "apparent_temperature",
-                "precipitation",
-                "rain",
-                "relative_humidity_2m",
-                "windspeed_10m"
-            ]),
-            "timezone":             TIMEZONE
+            "hourly":               ",".join(HOURLY_VARS),
+            "timezone":             TIMEZONE,
+            "models":               ARCHIVE_MODEL
         },
-        timeout=API_TIMEOUT
+        timeout=API_TIMEOUT * 4   # 1 ano × 15 variáveis
     )
     resp.raise_for_status()
     return resp.json()
@@ -51,14 +45,7 @@ def fetch_forecast() -> dict:
         params={
             "latitude":       LAT,
             "longitude":      LON,
-            "hourly":         ",".join([
-                "temperature_2m",
-                "apparent_temperature",
-                "precipitation",
-                "rain",
-                "relative_humidity_2m",
-                "windspeed_10m"
-            ]),
+            "hourly":         ",".join(HOURLY_VARS),
             "daily":          ",".join([
                 "temperature_2m_max",
                 "temperature_2m_min",
