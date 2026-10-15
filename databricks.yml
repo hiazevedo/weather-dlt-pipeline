@@ -89,7 +89,7 @@ resources:
     # do Archive (mesma fonte do treino). Domingo 04h, fora dos horários do job de 6 h.
     # -------------------------------------------------------------------------
     backfill_archive:
-      name: "[weather] Backfill semanal (Archive ERA5)"
+      name: "[weather] Backfill semanal (Archive ERA5 + ENSO)"
       schedule:
         quartz_cron_expression: "0 0 4 ? * SUN"
         timezone_id: "America/Sao_Paulo"
@@ -100,6 +100,15 @@ resources:
           - ${workspace.current_user.userName}
 
       tasks:
+        # Índice ENSO (ONI/NOAA): global, atualizado mensalmente — independe das demais tasks
+        - task_key: collect_enso
+          max_retries: 2
+          min_retry_interval_millis: 300000
+          description: "Atualiza weather_pipeline.silver.enso_oni (NOAA CPC)"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/07_collect_enso
+            source: WORKSPACE
+
         - task_key: backfill_archive
           max_retries: 2
           min_retry_interval_millis: 300000

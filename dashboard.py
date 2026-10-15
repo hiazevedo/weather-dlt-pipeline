@@ -333,7 +333,52 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Precipitação por Mês (média 1991–2020)
+# MAGIC ## 6. ENSO — El Niño / La Niña (NOAA CPC)
+# MAGIC > Índice ONI: anomalia da temperatura do mar no Niño 3.4 (média de 3 meses). Fase pelo limiar ±0,5 °C; intensidade: fraco < 1,0 ≤ moderado < 1,5 ≤ forte < 2,0 ≤ muito forte.
+# MAGIC > Índice global (vale para qualquer cidade). Tabela `weather_pipeline.silver.enso_oni`, atualizada pelo job semanal.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- ENSO atual (último trimestre publicado pela NOAA CPC) e tendência
+# MAGIC WITH u AS (
+# MAGIC   SELECT season, year, oni, fase, intensidade, center_month,
+# MAGIC          oni - LAG(oni) OVER (ORDER BY center_month) AS variacao
+# MAGIC   FROM weather_pipeline.silver.enso_oni
+# MAGIC )
+# MAGIC SELECT
+# MAGIC   CONCAT(
+# MAGIC     CASE fase WHEN 'El Niño' THEN '🔴 ' WHEN 'La Niña' THEN '🔵 ' ELSE '⚪ ' END,
+# MAGIC     fase,
+# MAGIC     CASE WHEN intensidade IS NOT NULL THEN CONCAT(' ', intensidade) ELSE '' END,
+# MAGIC     ' (', CASE WHEN oni >= 0 THEN '+' ELSE '' END,
+# MAGIC     REPLACE(CAST(ROUND(oni, 1) AS STRING), '.', ','), ')')        AS `ENSO`,
+# MAGIC   CONCAT(
+# MAGIC     CASE WHEN variacao >  0.1 THEN '📈 Aquecendo'
+# MAGIC          WHEN variacao < -0.1 THEN '📉 Esfriando'
+# MAGIC          ELSE '➡️ Estável' END,
+# MAGIC     ' · ', season, '/', year)                                    AS `Tendência`
+# MAGIC FROM u
+# MAGIC ORDER BY center_month DESC
+# MAGIC LIMIT 1
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- ONI dos últimos 15 anos; limiares de El Niño (+0,5) e La Niña (−0,5)
+# MAGIC SELECT
+# MAGIC   year + (MONTH(center_month) - 1) / 12.0  AS ano,
+# MAGIC   oni,
+# MAGIC   0.5                                       AS limiar_el_nino,
+# MAGIC   -0.5                                      AS limiar_la_nina
+# MAGIC FROM weather_pipeline.silver.enso_oni
+# MAGIC WHERE center_month >= add_months(current_date(), -12 * 15)
+# MAGIC ORDER BY center_month
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -365,7 +410,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Temperatura por Mês (média 1991–2020)
+# MAGIC ## 8. Temperatura por Mês (média 1991–2020)
 
 # COMMAND ----------
 
@@ -397,7 +442,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Tendência Anual de Temperatura (anos completos)
+# MAGIC ## 9. Tendência Anual de Temperatura (anos completos)
 # MAGIC > O ano corrente fica de fora: sem nov/dez, ele puxaria a média para baixo.
 
 # COMMAND ----------
