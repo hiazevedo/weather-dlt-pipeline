@@ -12,11 +12,14 @@ print("Construindo gold.weather_today...\n")
 TZ_BR    = pytz.timezone("America/Sao_Paulo")
 hoje     = datetime.now(TZ_BR).strftime("%Y-%m-%d")
 agora_h  = datetime.now(TZ_BR).hour
+# Hora cheia local (naive), no mesmo formato de observation_time (hora local sem fuso)
+agora_hora = datetime.now(TZ_BR).strftime("%Y-%m-%d %H:00:00")
 
 print(f"   Data hoje  : {hoje}")
 print(f"   Hora atual : {agora_h}h (Brasília)")
 
-# Pegar forecast mais recente (último arquivo coletado)
+# Dia inteiro (hoje + amanhã) = observado + previsão, da silver.weather_clean
+# (já deduplicada por hora, com is_forecast calculado no fuso local).
 # Usa variável Python `hoje` (America/Sao_Paulo) para evitar divergência
 # com CURRENT_DATE() do cluster que opera em UTC
 from datetime import timedelta as _td
@@ -34,7 +37,7 @@ df_forecast = spark.sql(f"""
         temp_class,
         rain_class,
         _ingested_at
-    FROM weather_pipeline.silver.weather_forecast
+    FROM weather_pipeline.silver.weather_clean
     WHERE DATE(observation_time) = '{hoje}'
        OR DATE(observation_time) = '{amanha}'
 """)
@@ -59,8 +62,10 @@ df_clima_hoje = spark.sql(f"""
 df_today = (
     df_forecast
     .join(df_clima_hoje, on="hour", how="left")
+    # is_past por timestamp (e não só pela hora do dia: as 0h–11h de amanhã
+    # não são passado). A hora cheia atual conta como passada/atual.
     .withColumn("is_past",
-        F.when(F.col("hour") < agora_h, True).otherwise(False))
+        F.col("observation_time") <= F.lit(agora_hora).cast("timestamp"))
     .withColumn("acima_climatologia",
         F.when(
             F.col("temperature_2m") > F.col("temp_climatologica"),
@@ -113,9 +118,10 @@ spark.sql(f"""
             ELSE                                      0
         END AS nivel_alerta,  -- 0=ok, 1=atenção, 2=chuva, 3=chuva forte
 
+        (observation_time <= TIMESTAMP'{agora_hora}') AS is_past,
         _ingested_at AS ultima_atualizacao
 
-    FROM weather_pipeline.silver.weather_forecast
+    FROM weather_pipeline.silver.weather_clean
     WHERE DATE(observation_time) = '{hoje}'
     ORDER BY observation_time
 """)

@@ -11,6 +11,7 @@ from pyspark.sql.types import (
 
 # BRONZE: Leitura raw dos JSONs do Volume
 RAW_PATH = "/Volumes/weather_pipeline/bronze/raw_json"
+TZ_LOCAL = "America/Sao_Paulo"  # fuso de observation_time (vem da Open-Meteo)
 
 hourly_schema = StructType([
     StructField("time",                  ArrayType(StringType()),  True),
@@ -97,9 +98,12 @@ def weather_clean():
         # Filtra linhas sem precipitation válido
         .filter(~F.isnan(F.col("precipitation")) & F.col("precipitation").isNotNull())
 
-        # Reclassificar is_forecast por tempo (horas passadas = observação real)
+        # Reclassificar is_forecast por tempo (horas passadas = observação real).
+        # observation_time é a hora LOCAL (America/Sao_Paulo) sem fuso; compará-la
+        # com current_timestamp() (UTC) errava a fronteira em 3h.
         .withColumn("is_forecast",
-            (F.col("observation_time") > F.current_timestamp()).cast("boolean"))
+            (F.col("observation_time") >
+             F.from_utc_timestamp(F.current_timestamp(), TZ_LOCAL)).cast("boolean"))
 
         # Features temporais
         .withColumn("year",    F.year("observation_time"))
