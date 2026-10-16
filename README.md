@@ -102,7 +102,7 @@ weather-dlt-pipeline/
 ├── 09_collect_previous_runs.py # Previsões arquivadas com antecedência → silver.forecast_previous_runs
 ├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
 ├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
-├── 12_enso_impacto.py       # ENSO × clima de Birigui → gold.enso_impacto, enso_previsibilidade, estacao_chuvosa + view estacao_vs_analogos
+├── 12_enso_impacto.py       # ENSO × clima de Birigui → gold.enso_impacto, enso_previsibilidade, estacao_chuvosa + views estacao_vs_analogos e acuracia_por_enso
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
 ├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
 ├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
@@ -249,6 +249,7 @@ nessa escala, em três fontes independentes:
 | Estação chuvosa? | O início não muda com o ENSO. No fim e na duração, modelo e pluviômetros discordam até no sinal |
 | Algum resultado sobrevive à correção? | Não: das 737 comparações, 42 têm p < 0,05 (o acaso daria ~37) e nenhuma tem q < 0,10 |
 | Dá para prever o trimestre pelo ONI? | Não: 0 de 490 combinações (trimestre × variável × antecedência) batem a climatologia; o melhor RPSS é 0,07 |
+| A previsão erra mais com El Niño? | Até agora, não. Na API Open-Meteo, o F1 é 0,49 com El Niño e 0,50 sem, na rodada de 1 dia antes; na de 2 dias antes, 0,46 e 0,49. A comparação usa os 10 meses do calendário com dados nas duas situações (El Niño em jan–abr/2024 e mai–out/2026). O champion ainda não tem meses fora do El Niño |
 
 Por isso o painel não traz uma "previsão sazonal pelo ENSO". Ele mostra a estação
 em curso contra a normal e contra os anos de ONI parecido, com a ressalva de que o
@@ -282,6 +283,17 @@ desde o mínimo.
 Em out/2026 havia um El Niño muito forte: o ONI de JAS chegou a +2,16, o maior para
 esse trimestre desde 1950. Os anos mais parecidos (1997–98 e 2015–16) estão bem
 abaixo, então a comparação com eles é extrapolação.
+
+**A previsão erra mais com El Niño?** (`gold.acuracia_por_enso`): view com o acerto
+mensal de "vai chover na hora" (rótulo Open-Meteo) e a fase do ENSO de cada mês.
+Cobre a API Open-Meteo (previsões arquivadas desde 2024, rodadas de 1 e 2 dias
+antes) e o champion (histórico de inferência). A rodada do próprio dia fica de fora,
+porque é a mesma série do rótulo observado.
+
+A comparação só usa meses do calendário que têm dados com e sem El Niño: o acerto
+muda muito entre a estação seca e a chuvosa. **Rever em mar/2027:** até lá, o
+champion acumula o primeiro El Niño forte do histórico, e a comparação dele
+aparece no painel assim que houver meses sem El Niño.
 
 **Cuidados**
 

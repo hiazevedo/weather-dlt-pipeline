@@ -23,6 +23,8 @@
 #   gold.estacao_vs_analogos   VIEW: chuva e dias ≥ 35 °C acumulados desde 1/jul
 #                              na estação atual × normal 1991–2020 × os 5 anos com
 #                              o ONI mais parecido com o atual
+#   gold.acuracia_por_enso     VIEW: acerto mensal da API Open-Meteo (1 e 2 dias
+#                              antes) e do champion × fase do ENSO no mês
 
 # COMMAND ----------
 
@@ -416,6 +418,69 @@ spark.sql(f"""
     SELECT '{CIDADE}' AS cidade, date_add(make_date(atual.ano, 7, 1), s.dia_estacao) AS data, s.*,
            (SELECT season FROM ult)                               AS trimestre_oni
     FROM series s, atual
+""")
+
+# COMMAND ----------
+
+# A previsão erra mais com El Niño? Acerto mensal de "vai chover na hora" (rótulo
+# Open-Meteo, chuva > 0) da API (previsões arquivadas, desde 2024) e do champion
+# (histórico de inferência), com a fase do ENSO do mês. Para comparar fases, use
+# os mesmos meses do calendário: o acerto muda muito entre estação seca e chuvosa.
+
+spark.sql(f"""
+    CREATE OR REPLACE VIEW {CATALOG}.gold.acuracia_por_enso AS
+    WITH obs AS (
+        SELECT observation_time, precipitation AS chuva_obs, temperature_2m AS temp_obs
+        FROM {CATALOG}.silver.weather_clean
+        WHERE NOT is_forecast AND cidade = '{CIDADE}'
+    ),
+    api AS (                     -- previsões arquivadas: rodadas de 1 e de 2 dias antes (a do próprio dia, d0,
+                                 -- é a mesma série do rótulo observado e daria acerto perfeito)
+        SELECT observation_time,
+               stack(2, 'd1 (1 dia antes)',  precipitation_d1, temperature_2m_d1,
+                        'd2 (2 dias antes)', precipitation_d2, temperature_2m_d2) AS (antecedencia, chuva_prev, temp_prev)
+        FROM {CATALOG}.silver.forecast_previous_runs
+    ),
+    prev AS (
+        SELECT observation_time, 'API Open-Meteo' AS fonte, antecedencia, chuva_prev, temp_prev FROM api
+        UNION ALL                -- champion: todas as previsões feitas antes da hora (até 24 h)
+        SELECT target_time, 'champion', '1–24 h', CAST(pred_vai_chover AS DOUBLE), CAST(NULL AS DOUBLE)
+        FROM {CATALOG}.gold.rain_forecast_ml_history
+        WHERE inferencia_local < target_time
+    ),
+    agg AS (
+        SELECT p.fonte, p.antecedencia, to_date(date_trunc('MONTH', p.observation_time)) AS mes,
+               count(*)                                                                AS horas,
+               sum(CASE WHEN p.chuva_prev > 0 AND o.chuva_obs > 0 THEN 1 ELSE 0 END)  AS acertos,
+               sum(CASE WHEN p.chuva_prev > 0 AND o.chuva_obs = 0 THEN 1 ELSE 0 END)  AS falsos_alarmes,
+               sum(CASE WHEN p.chuva_prev = 0 AND o.chuva_obs > 0 THEN 1 ELSE 0 END)  AS perdidas,
+               sum(p.chuva_prev)                                                       AS chuva_prev_mm,
+               sum(o.chuva_obs)                                                        AS chuva_obs_mm,
+               avg(abs(p.temp_prev - o.temp_obs))                                      AS mae_temp
+        FROM prev p JOIN obs o USING (observation_time)
+        WHERE p.chuva_prev IS NOT NULL
+        GROUP BY 1, 2, 3
+    ),
+    ref AS (                     -- ONI do trimestre centrado no mês; sem publicação ainda, o último publicado
+        SELECT m.mes, max(e.center_month) AS cm
+        FROM (SELECT DISTINCT mes FROM agg) m JOIN {CATALOG}.silver.enso_oni e ON e.center_month <= m.mes
+        GROUP BY m.mes
+    )
+    SELECT
+        '{CIDADE}' AS cidade, a.fonte, a.antecedencia, a.mes, month(a.mes) AS mes_do_ano,
+        e.oni,
+        CASE WHEN e.oni >= 0.5 THEN 'El Niño' WHEN e.oni <= -0.5 THEN 'La Niña' ELSE 'Neutro' END AS fase,
+        e.center_month <> a.mes                                                         AS oni_provisorio,
+        a.horas, a.acertos, a.falsos_alarmes, a.perdidas,
+        round(2 * a.acertos / nullif(2 * a.acertos + a.falsos_alarmes + a.perdidas, 0), 3) AS f1,
+        round(a.acertos / nullif(a.acertos + a.perdidas, 0), 3)                         AS pod,
+        round(a.falsos_alarmes / nullif(a.acertos + a.falsos_alarmes, 0), 3)            AS far,
+        round((a.acertos + a.falsos_alarmes) / nullif(a.acertos + a.perdidas, 0), 2)    AS vies_frequencia,
+        CASE WHEN a.fonte <> 'champion' THEN round(a.chuva_prev_mm / nullif(a.chuva_obs_mm, 0), 2) END AS vies_volume,
+        round(a.mae_temp, 2)                                                            AS mae_temp_c
+    FROM agg a
+    JOIN ref r USING (mes)
+    JOIN {CATALOG}.silver.enso_oni e ON e.center_month = r.cm
 """)
 
 # COMMAND ----------

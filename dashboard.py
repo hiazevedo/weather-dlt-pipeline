@@ -683,6 +683,85 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC #### A previsão erra mais com El Niño?
+# MAGIC > View `gold.acuracia_por_enso`: acerto mensal de "vai chover na hora" (rótulo Open-Meteo) da API Open-Meteo (previsões arquivadas desde 2024, rodadas de 1 e 2 dias antes) e do champion, com a fase do ENSO do mês. A comparação usa só os meses do calendário que têm dados com e sem El Niño. O champion só tem histórico desde out/2026 (já com El Niño): a comparação dele aparece quando houver meses sem El Niño.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- A previsão erra mais com El Niño? F1 de "vai chover na hora" (rótulo Open-Meteo), somando só os meses do
+# MAGIC -- calendário que têm dados com e sem El Niño — assim não se compara estação seca com chuvosa
+# MAGIC -- (view gold.acuracia_por_enso)
+# MAGIC WITH a AS (
+# MAGIC   SELECT fonte, antecedencia, mes_do_ano, fase = 'El Niño' AS el_nino,
+# MAGIC          SUM(acertos) AS tp, SUM(falsos_alarmes) AS fp, SUM(perdidas) AS fn, SUM(horas) AS horas
+# MAGIC   FROM weather_pipeline.gold.acuracia_por_enso
+# MAGIC   GROUP BY fonte, antecedencia, mes_do_ano, fase = 'El Niño'
+# MAGIC ),
+# MAGIC par AS (
+# MAGIC   SELECT fonte, antecedencia, mes_do_ano FROM a
+# MAGIC   GROUP BY fonte, antecedencia, mes_do_ano HAVING COUNT(DISTINCT el_nino) = 2
+# MAGIC ),
+# MAGIC t AS (
+# MAGIC   SELECT a.fonte, a.antecedencia,
+# MAGIC          COUNT(DISTINCT a.mes_do_ano)                                                        AS meses,
+# MAGIC          SUM(CASE WHEN a.el_nino THEN a.tp END)     * 2.0 /
+# MAGIC            NULLIF(SUM(CASE WHEN a.el_nino THEN 2 * a.tp + a.fp + a.fn END), 0)                AS f1_en,
+# MAGIC          SUM(CASE WHEN NOT a.el_nino THEN a.tp END) * 2.0 /
+# MAGIC            NULLIF(SUM(CASE WHEN NOT a.el_nino THEN 2 * a.tp + a.fp + a.fn END), 0)            AS f1_outros,
+# MAGIC          SUM(CASE WHEN a.el_nino THEN a.horas END)                                           AS h_en,
+# MAGIC          SUM(CASE WHEN NOT a.el_nino THEN a.horas END)                                       AS h_outros
+# MAGIC   FROM a JOIN par USING (fonte, antecedencia, mes_do_ano)
+# MAGIC   GROUP BY a.fonte, a.antecedencia
+# MAGIC ),
+# MAGIC fontes AS (SELECT DISTINCT fonte, antecedencia FROM weather_pipeline.gold.acuracia_por_enso)
+# MAGIC SELECT
+# MAGIC   f.fonte                                                                          AS `Previsão`,
+# MAGIC   f.antecedencia                                                                   AS `Antecedência`,
+# MAGIC   COALESCE(t.meses, 0)                                                             AS `Meses do ano comparáveis`,
+# MAGIC   CASE WHEN t.f1_en IS NULL THEN '⏳ aguardando meses sem El Niño'
+# MAGIC        ELSE CONCAT(REPLACE(FORMAT_NUMBER(t.f1_en, 2), '.', ','), ' (', REPLACE(FORMAT_NUMBER(t.h_en, 0), ',', '.'), ' h)') END    AS `F1 com El Niño`,
+# MAGIC   CASE WHEN t.f1_outros IS NULL THEN '—'
+# MAGIC        ELSE CONCAT(REPLACE(FORMAT_NUMBER(t.f1_outros, 2), '.', ','), ' (', REPLACE(FORMAT_NUMBER(t.h_outros, 0), ',', '.'), ' h)') END AS `F1 nos mesmos meses sem El Niño`,
+# MAGIC   CASE WHEN t.f1_en IS NULL OR t.f1_outros IS NULL THEN '—'
+# MAGIC        ELSE CONCAT(CASE WHEN t.f1_en >= t.f1_outros THEN '+' ELSE '' END,
+# MAGIC                    REPLACE(FORMAT_NUMBER(t.f1_en - t.f1_outros, 2), '.', ',')) END AS `Diferença`
+# MAGIC FROM fontes f
+# MAGIC LEFT JOIN t USING (fonte, antecedencia)
+# MAGIC ORDER BY f.fonte, f.antecedencia
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Mês a mês: F1 da API Open-Meteo (rodada de 1 dia antes) com El Niño × nos mesmos meses sem El Niño.
+# MAGIC -- Meses secos têm poucas horas de chuva: um punhado de acertos muda o F1 — olhar a coluna de horas.
+# MAGIC WITH a AS (
+# MAGIC   SELECT mes_do_ano, fase = 'El Niño' AS el_nino,
+# MAGIC          SUM(acertos) AS tp, SUM(falsos_alarmes) AS fp, SUM(perdidas) AS fn,
+# MAGIC          CONCAT_WS(', ', ARRAY_SORT(COLLECT_SET(CAST(YEAR(mes) AS STRING))))                 AS anos
+# MAGIC   FROM weather_pipeline.gold.acuracia_por_enso
+# MAGIC   WHERE fonte = 'API Open-Meteo' AND antecedencia LIKE 'd1%'
+# MAGIC   GROUP BY mes_do_ano, fase = 'El Niño'
+# MAGIC ),
+# MAGIC f AS (
+# MAGIC   SELECT *, CASE WHEN 2 * tp + fp + fn > 0 THEN REPLACE(FORMAT_NUMBER(2.0 * tp / (2 * tp + fp + fn), 2), '.', ',') END AS f1
+# MAGIC   FROM a
+# MAGIC )
+# MAGIC SELECT
+# MAGIC   ELEMENT_AT(ARRAY('Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'), mes_do_ano) AS `Mês`,
+# MAGIC   COALESCE(MAX(CASE WHEN el_nino THEN anos END), '—')         AS `Anos com El Niño`,
+# MAGIC   COALESCE(MAX(CASE WHEN el_nino THEN f1 END), '—')           AS `F1 com El Niño`,
+# MAGIC   MAX(CASE WHEN el_nino THEN tp + fn END)                     AS `Horas de chuva (El Niño)`,
+# MAGIC   COALESCE(MAX(CASE WHEN NOT el_nino THEN anos END), '—')     AS `Anos sem El Niño`,
+# MAGIC   COALESCE(MAX(CASE WHEN NOT el_nino THEN f1 END), '—')       AS `F1 sem El Niño`,
+# MAGIC   MAX(CASE WHEN NOT el_nino THEN tp + fn END)                 AS `Horas de chuva (sem El Niño)`
+# MAGIC FROM f
+# MAGIC GROUP BY mes_do_ano
+# MAGIC ORDER BY mes_do_ano
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 9. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
