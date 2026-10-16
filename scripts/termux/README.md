@@ -38,3 +38,16 @@ Python) — a CLI do Databricks tem problema de DNS no Android.
 - Agenda: `crontab -l`. Os scripts se atualizam sozinhos (`git pull` diário às 4h30).
 - Token expirado: edite `~/.databrickscfg` com um token novo.
 - Rodar na mão: `cd ~/weather-dlt-pipeline && python scripts/inmet_avisos_sync.py --forcar`.
+
+## Acesso remoto (SSH via Tailscale)
+
+Com o app do Tailscale conectado no celular ("VPN sempre ativa", sem otimização de
+bateria), rode no Termux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hiazevedo/weather-dlt-pipeline/main/scripts/termux/acesso_remoto.sh | bash
+```
+
+Instala o OpenSSH (porta 8022), autoriza só a chave do PC de desenvolvimento,
+desliga login por senha e sobe o `sshd` como serviço (inclusive no boot). Do PC,
+que também está no Tailscale: `ssh -p 8022 <usuário>@<nome-do-celular>`.
