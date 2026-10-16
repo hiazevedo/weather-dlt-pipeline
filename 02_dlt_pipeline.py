@@ -1,5 +1,6 @@
 # Databricks notebook source
 import dlt
+from datetime import datetime, timedelta
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import (
@@ -12,6 +13,7 @@ from pyspark.sql.types import (
 # BRONZE: Leitura raw dos JSONs do Volume
 RAW_PATH = "/Volumes/weather_pipeline/bronze/raw_json"
 TZ_LOCAL = "America/Sao_Paulo"  # fuso de observation_time (vem da Open-Meteo)
+FORECAST_JANELA_DIAS = 16       # arquivos de previsão lidos pelo weather_raw (ver weather_raw)
 
 hourly_schema = StructType([
     StructField("time",                  ArrayType(StringType()),  True),
@@ -52,12 +54,21 @@ root_schema = StructType([
     }
 )
 def weather_raw():
+    # Todo o histórico (historical_*.json, Archive) + só os arquivos de previsão
+    # recentes. Com a coleta de hora em hora entram 24 forecast_*.json por dia;
+    # os antigos já estão cobertos pelo Archive (o backfill semanal vai até
+    # hoje − 5 dias, então 16 dias de previsões cobrem a pior janela entre
+    # backfills, com folga). Sem isso o DLT ficaria mais lento a cada hora.
+    def ler(padrao, **opcoes):
+        df = spark.read.format("json").schema(root_schema).option("pathGlobFilter", padrao)
+        for k, v in opcoes.items():
+            df = df.option(k, v)
+        # _metadata (coluna oculta) é lido antes do union, onde ela não sobrevive
+        return df.load(RAW_PATH).withColumn("_source_file", F.col("_metadata.file_path"))
+
+    desde = (datetime.utcnow() - timedelta(days=FORECAST_JANELA_DIAS)).strftime("%Y-%m-%dT%H:%M:%S")
     return (
-        spark.read
-        .format("json")
-        .schema(root_schema)
-        .load(RAW_PATH)
-        .withColumn("_source_file",  F.col("_metadata.file_path"))
+        ler("historical_*.json").unionByName(ler("forecast_*.json", modifiedAfter=desde))
         .withColumn("_ingested_at",  F.current_timestamp())
         .withColumn("is_forecast",
             F.col("_source_file").contains("forecast").cast("boolean"))

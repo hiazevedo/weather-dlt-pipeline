@@ -47,8 +47,8 @@ FIM="# <<< weather-dlt-pipeline"
 { (crontab -l 2>/dev/null || true) | sed "/^$INI/,/^$FIM/d"
   cat <<EOF
 $INI (gerado por scripts/termux/setup.sh)
-# avisos do INMET a cada 3 h
-0 */3 * * * cd $REPO && python scripts/inmet_avisos_sync.py >> $LOGS/cron.log 2>&1
+# avisos do INMET a cada hora (só envia ao Databricks quando algum aviso muda)
+0 * * * * cd $REPO && python scripts/inmet_avisos_sync.py >> $LOGS/cron.log 2>&1
 # pacotes anuais das estações do INMET (só baixa quando o pacote muda; diário porque o cron não recupera execuções perdidas)
 0 10 * * * cd $REPO && python scripts/inmet_sync.py --ingerir >> $LOGS/cron.log 2>&1
 # mantém os scripts atualizados com o GitHub

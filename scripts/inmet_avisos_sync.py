@@ -16,7 +16,7 @@ O que faz:
      weather_pipeline.bronze.inmet_avisos e dispara o notebook 11_ingest_avisos.
 
 Uso:
-  python3 scripts/inmet_avisos_sync.py            # agendado a cada 3 h
+  python3 scripts/inmet_avisos_sync.py            # agendado a cada hora (cron do celular)
   python3 scripts/inmet_avisos_sync.py --forcar   # envia mesmo sem mudança
 """
 import argparse

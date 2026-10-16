@@ -12,7 +12,7 @@
 
 ## 📌 Sobre o projeto
 
-Pipeline meteorológico completo que coleta dados da **Open-Meteo API** para Birigui-SP (-21.2878, -50.3409), processa via **Delta Live Tables** com validações automáticas de qualidade, e alimenta um dashboard em tempo real com previsão do tempo atualizada a cada 6 horas via **Databricks Workflows**.
+Pipeline meteorológico completo que coleta dados da **Open-Meteo API** para Birigui-SP (-21.2878, -50.3409), processa via **Delta Live Tables** com validações automáticas de qualidade, e alimenta um dashboard em tempo real com previsão do tempo atualizada a cada hora via **Databricks Workflows**.
 
 ---
 
@@ -53,7 +53,7 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
 └─────────────────┘
            │
            ▼
-  [Dashboard SQL + Workflow 6h]
+  [Dashboard SQL + Workflow de hora em hora]
 ```
 
 ---
@@ -89,12 +89,12 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
 ```
 weather-dlt-pipeline/
 ├── config.py                # Constantes centralizadas (LAT, LON, paths, variáveis horárias, modelo do Archive)
-├── databricks.yml           # Databricks Asset Bundle — Workflow completo (6h)
+├── databricks.yml           # Databricks Asset Bundle — Workflows (1h, semanal)
 ├── 00_setup.py              # Catalog, schemas, volumes
 ├── 01_collect_history.py    # 87 anos histórico — 755k registros
 ├── 02_dlt_pipeline.py       # Pipeline DLT (Bronze→Silver→Gold)
 ├── 03_visualizacoes.py      # 4 gráficos históricos de tendência climática
-├── 04_collect_forecast.py   # Coleta previsão atualizada (6h)
+├── 04_collect_forecast.py   # Coleta previsão atualizada (a cada hora)
 ├── 05_gold_today.py         # gold.weather_today + gold.rain_alert
 ├── 06_backfill_archive.py   # Backfill semanal com o Archive (ERA5)
 ├── 07_collect_enso.py       # Índice ENSO (ONI/NOAA) → silver.enso_oni
@@ -114,11 +114,11 @@ weather-dlt-pipeline/
 
 ## Workflow automatizado
 
-Pipeline roda automaticamente **4x por dia** via Databricks Workflows, configurado no `databricks.yml`:
+Pipeline roda automaticamente **a cada hora** via Databricks Workflows, configurado no `databricks.yml` (o DLT lê todo o histórico e só os arquivos de previsão dos últimos 16 dias, então o custo não cresce com o tempo):
 
 ```
-Weather Birigui - Previsao + ML (6h)
-  Schedule: 00h, 06h, 12h, 18h (Brasília)
+[weather] Pipeline Completo (1h)
+  Schedule: a cada hora cheia (Brasília)
 
   coleta_previsao  ← coleta API Open-Meteo (+ 7 dias histórico recente)
        │
@@ -148,7 +148,7 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
   rebuild_features  ← reconstrói gold.rain_features (bundle de ML)
 ```
 
-Ele fecha sozinho buracos deixados por falhas do job de 6 h e troca, nas horas
+Ele fecha sozinho buracos deixados por falhas do job de hora em hora e troca, nas horas
 recentes, o "passado" da API de previsão pelos dados do Archive — a mesma fonte
 usada no treino do modelo.
 
@@ -157,7 +157,7 @@ usada no treino do modelo.
 | Fonte | O que traz | Tabela |
 |---|---|---|
 | Open-Meteo Archive (ERA5/IFS) | Série horária desde 1940 — temperatura, chuva, umidade, vento + orvalho, pressão, nuvens por camada, direção do vento, vapor d'água na coluna e camada limite | `silver.weather_clean` |
-| Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis) a cada 6 h | `silver.weather_forecast` |
+| Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis) a cada hora | `silver.weather_forecast` |
 | Open-Meteo Previous Runs | O que cada rodada previu 0, 1 e 2 dias antes (desde 2024) | `silver.forecast_previous_runs` |
 | NOAA CPC | Índice ONI (El Niño / La Niña), global | `silver.enso_oni` |
 | NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997) | `silver.gauge_daily` |
@@ -183,7 +183,7 @@ usa a API REST (`scripts/dbx.py`).
 - Avisos: `scripts/inmet_avisos_sync.py` (cron do celular, a cada 3 h) baixa os
   avisos ativos e futuros da UF, envia
   um snapshot ao Volume `bronze.inmet_avisos` quando algo muda e dispara o
-  `11_ingest_avisos`, que também roda no job de 6 h como reforço.
+  `11_ingest_avisos`, que também roda no job semanal como reforço.
 
 Dados horários quase em tempo real exigiriam a API do INMET com token
 (solicitado por e-mail a cadastro.act@inmet.gov.br), também a partir da rede local.
@@ -232,7 +232,7 @@ Dashboard Databricks SQL atualizado automaticamente com:
 | **Databricks Free Edition** | Ambiente Serverless AWS |
 | **Delta Live Tables** | Pipeline declarativo com expectations |
 | **Unity Catalog** | Governança + Volumes |
-| **Databricks Workflows** | Orquestração 4x/dia |
+| **Databricks Workflows** | Orquestração de hora em hora + semanal |
 | **Databricks Asset Bundles** | Pipeline e workflow como código |
 | **Databricks SQL** | Dashboard em tempo real |
 | **Open-Meteo API** | Dados meteorológicos (gratuita) |

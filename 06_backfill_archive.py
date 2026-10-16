@@ -3,7 +3,7 @@
 #
 # Regrava historical_<ano>.json do ano corrente (e do anterior, na virada do
 # ano) até hoje − 5 dias (atraso do Archive). Efeitos:
-#   - fecha sozinho buracos deixados por falhas do job de 6 h;
+#   - fecha sozinho buracos deixados por falhas do job de hora em hora;
 #   - troca, nas horas recentes, o "passado" da API de previsão pelos dados
 #     do Archive (ERA5) — a mesma fonte usada no treino do modelo.
 # Na silver, weather_clean dá prioridade a arquivos historical_* sobre forecast_*.

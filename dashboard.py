@@ -130,14 +130,14 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC #### Status do pipeline — 🔴 se a última previsão tiver mais de 7 h
+# MAGIC #### Status do pipeline — 🔴 se a última previsão tiver mais de 2 h (pipeline de hora em hora)
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC SELECT
 # MAGIC   CASE
-# MAGIC     WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(MAX(inferencia_local))) / 60 <= 420
+# MAGIC     WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(MAX(inferencia_local))) / 60 <= 120   -- pipeline roda a cada hora: 🔴 com 2 h sem atualização
 # MAGIC       THEN CONCAT('🟢 Atualizado às ', DATE_FORMAT(MAX(inferencia_local), 'HH:mm'))
 # MAGIC     ELSE CONCAT('🔴 Atrasado · desde ', DATE_FORMAT(MAX(inferencia_local), 'dd/MM HH:mm'))
 # MAGIC   END AS `Status`

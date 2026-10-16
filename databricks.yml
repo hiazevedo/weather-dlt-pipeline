@@ -21,12 +21,12 @@ resources:
   jobs:
 
     # -------------------------------------------------------------------------
-    # Job principal: coleta previsão → DLT → gold (roda a cada 6h)
+    # Job principal: coleta previsão → DLT → gold → features → previsões (a cada hora)
     # -------------------------------------------------------------------------
     weather_pipeline:
-      name: "[weather] Pipeline Completo (6h)"
+      name: "[weather] Pipeline Completo (1h)"
       schedule:
-        quartz_cron_expression: "0 0 0/6 * * ?"
+        quartz_cron_expression: "0 0 * * * ?"
         timezone_id: "America/Sao_Paulo"
         pause_status: UNPAUSED
 
@@ -35,14 +35,6 @@ resources:
           - ${workspace.current_user.userName}
 
       tasks:
-        # Avisos do INMET: o script local envia snapshots e já dispara a ingestão;
-        # esta task garante a atualização mesmo se aquele disparo falhar
-        - task_key: ingest_avisos
-          max_retries: 1
-          notebook_task:
-            notebook_path: ${workspace.file_path}/11_ingest_avisos
-            source: WORKSPACE
-
         - task_key: coleta_previsao
           max_retries: 2
           min_retry_interval_millis: 60000
@@ -95,7 +87,7 @@ resources:
     # Job semanal: ENSO e previsões arquivadas (independentes) +
     #              backfill com o Archive (ERA5) → DLT → reconstrução das features
     # Fecha buracos deixados por falhas e troca as horas recentes pelos dados
-    # do Archive (mesma fonte do treino). Domingo 04h, fora dos horários do job de 6 h.
+    # do Archive (mesma fonte do treino). Domingo 04h, no meio da hora (o job de 1h roda na hora cheia).
     # -------------------------------------------------------------------------
     backfill_archive:
       name: "[weather] Semanal — Archive ERA5, ENSO e previsões arquivadas"
@@ -134,6 +126,14 @@ resources:
           description: "Atualiza weather_pipeline.silver.inmet_hourly a partir do Volume bronze.inmet"
           notebook_task:
             notebook_path: ${workspace.file_path}/10_ingest_inmet
+            source: WORKSPACE
+
+        # Avisos do INMET: o coletor do celular já dispara a ingestão quando um aviso
+        # muda; esta task é só um reforço semanal
+        - task_key: ingest_avisos
+          max_retries: 1
+          notebook_task:
+            notebook_path: ${workspace.file_path}/11_ingest_avisos
             source: WORKSPACE
 
         # Champion × chuva medida nas cidades das estações do INMET (dashboard)

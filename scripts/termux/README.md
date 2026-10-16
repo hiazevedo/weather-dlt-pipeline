@@ -6,7 +6,7 @@ rodam fora do Databricks, num celular Android na tomada, ligado ao Wi-Fi de casa
 
 | Script | O que faz | Agenda (cron) |
 |---|---|---|
-| `scripts/inmet_avisos_sync.py` | Avisos meteorológicos oficiais (Defesa Civil) da UF; envia só quando mudam | a cada 3 h |
+| `scripts/inmet_avisos_sync.py` | Avisos meteorológicos oficiais (Defesa Civil) da UF; envia só quando mudam | a cada hora |
 | `scripts/inmet_sync.py --ingerir` | Pacotes anuais das estações automáticas num raio de 80 km; baixa só quando o pacote muda | diário, 10h |
 
 O envio ao Databricks usa a API REST (`scripts/dbx.py`, só biblioteca padrão do

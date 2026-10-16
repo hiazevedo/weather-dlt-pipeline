@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 # COMMAND ----------
 
-# Coleta previsão atualizada (roda a cada 6h pelo Workflow)
+# Coleta previsão atualizada (roda a cada hora pelo Workflow)
 print(f"Coletando previsão atualizada — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n")
 
 try:
