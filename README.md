@@ -136,7 +136,7 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
 
 ```
 [weather] Semanal — Archive ERA5, ENSO e previsões arquivadas
-  Schedule: domingo 04h (Brasília)
+  Schedule: domingo 04h30 (Brasília; no meio da hora, longe do job de 1h)
 
   collect_enso           ← índice ONI da NOAA (mensal; independente)
   collect_previous_runs  ← previsões arquivadas d0/d1/d2 (base para MOS; independente)

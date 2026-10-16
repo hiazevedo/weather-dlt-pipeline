@@ -87,12 +87,13 @@ resources:
     # Job semanal: ENSO e previsões arquivadas (independentes) +
     #              backfill com o Archive (ERA5) → DLT → reconstrução das features
     # Fecha buracos deixados por falhas e troca as horas recentes pelos dados
-    # do Archive (mesma fonte do treino). Domingo 04h, no meio da hora (o job de 1h roda na hora cheia).
+    # do Archive (mesma fonte do treino). Domingo 04h30, no meio da hora: o job de 1h
+    # roda na hora cheia e dispara o mesmo pipeline DLT e grava a mesma gold.rain_features.
     # -------------------------------------------------------------------------
     backfill_archive:
       name: "[weather] Semanal — Archive ERA5, ENSO e previsões arquivadas"
       schedule:
-        quartz_cron_expression: "0 0 4 ? * SUN"
+        quartz_cron_expression: "0 30 4 ? * SUN"
         timezone_id: "America/Sao_Paulo"
         pause_status: UNPAUSED
 
