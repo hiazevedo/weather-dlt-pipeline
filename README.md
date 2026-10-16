@@ -102,6 +102,7 @@ weather-dlt-pipeline/
 ├── 09_collect_previous_runs.py # Previsões arquivadas com antecedência → silver.forecast_previous_runs
 ├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
 ├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
+├── 12_enso_impacto.py       # ENSO × clima de Birigui → gold.enso_impacto, enso_previsibilidade, estacao_chuvosa + view estacao_vs_analogos
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
 ├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
 ├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
@@ -146,6 +147,8 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
   dlt_pipeline      ← a silver prioriza historical_* sobre forecast_* na mesma hora
        │
   rebuild_features  ← reconstrói gold.rain_features (bundle de ML)
+
+  enso_impacto      ← estudo do ENSO e estação chuvosa (depois de collect_enso, ingest_inmet e dlt_pipeline)
 ```
 
 Ele fecha sozinho buracos deixados por falhas do job de hora em hora e troca, nas horas
@@ -207,6 +210,87 @@ databricks bundle deploy
 - **Jul/Ago:** seca intensa — apenas 4.5% das horas
 - **Chuva máxima** registrada: 34.9mm em uma hora
 - **Temperatura máxima** registrada: 41.8°C
+
+---
+
+## ENSO em Birigui — o que o El Niño muda aqui?
+
+O experimento 08 do bundle de ML já tinha mostrado que o ONI não ajuda a prever
+a próxima hora: o ENSO age na escala de meses. O `12_enso_impacto` mede o efeito
+nessa escala, em três fontes independentes:
+
+- modelo (ERA5, 1950→hoje)
+- 11 pluviômetros do GHCN num raio de 20 km (1950–1997)
+- 4 estações do INMET (2007→hoje)
+
+**Como**
+
+- **Variáveis por trimestre móvel** (DJF…NDJ, mesma chave do ONI): chuva, dias com
+  chuva, dias com ≥ 20 mm, maior sequência seca, média das máximas e dias com máxima
+  ≥ 35 °C.
+- **Anomalias sem a tendência de longo prazo:** o aquecimento e a secagem não viram
+  "efeito do ENSO".
+- **Cada fase × demais anos:** intervalo de confiança de 90% (bootstrap), p-valor
+  por permutação e q-valor de Benjamini–Hochberg, porque são centenas de testes.
+- **Estação chuvosa:** início e fim pelo método de Liebmann et al. (2007), a partir
+  da chuva acumulada acima da média diária.
+- **Previsibilidade:** o ONI já publicado antes do trimestre (0 a 6 meses) prevê o
+  tercil (abaixo, normal ou acima)? Teste retroativo deixando cada ano de fora,
+  medido pelo RPSS contra a climatologia.
+
+**Resultados** (out/2026)
+
+| Pergunta | Resposta |
+|---|---|
+| El Niño muda a chuva do verão (nov–mar)? | Não: −6% a +3% nas três fontes |
+| E a da estação seca (abr–set)? | Chove mais com El Niño: +17% a +39% no modelo, +15% a +20% nos pluviômetros e +33% a +73% no INMET (só 3 anos). Em mm é pouco: +15 a +54 mm por trimestre |
+| E a La Niña? | Fim da estação seca e primavera (jul–nov) um pouco mais secos: −9% a −21% no modelo e nos pluviômetros |
+| Calor? | El Niño moderado ou forte: máximas +0,3 a +0,4 °C e cerca de 1 dia a mais com ≥ 35 °C por trimestre, de set a jan; dentro do ruído |
+| Estação chuvosa? | O início não muda com o ENSO. No fim e na duração, modelo e pluviômetros discordam até no sinal |
+| Algum resultado sobrevive à correção? | Não: das 737 comparações, 42 têm p < 0,05 (o acaso daria ~37) e nenhuma tem q < 0,10 |
+| Dá para prever o trimestre pelo ONI? | Não: 0 de 490 combinações (trimestre × variável × antecedência) batem a climatologia; o melhor RPSS é 0,07 |
+
+Por isso o painel não traz uma "previsão sazonal pelo ENSO". Ele mostra a estação
+em curso contra a normal e contra os anos de ONI parecido, com a ressalva de que o
+efeito aqui é pequeno. Birigui fica na faixa de transição entre o Sul do Brasil,
+onde o El Niño traz mais chuva, e o Norte/Nordeste, onde traz menos.
+
+> 📌 **Lembrete para a expansão a outras cidades:** "o ENSO muda pouco o clima" vale
+> para Birigui, não em geral. No Sul (mais chuva com El Niño) e no Norte/Nordeste
+> (seca com El Niño) o sinal é forte, e lá a previsão sazonal pelo ONI, descartada
+> aqui, pode passar no teste. Ao adicionar uma cidade:
+>
+> - rodar o `12_enso_impacto` para ela; o notebook usa a cidade do `config.py`, e as
+>   saídas têm a coluna `cidade`;
+> - olhar a `gold.enso_previsibilidade` antes de decidir se o painel dessa cidade
+>   ganha uma perspectiva sazonal.
+>
+> Hoje o notebook regrava as tabelas inteiras, como o resto do pipeline. Com várias
+> cidades, a gravação passa a ser por cidade (`replaceWhere`).
+
+**Acompanhamento da estação** (`gold.estacao_vs_analogos`): view com a chuva e os
+dias com ≥ 35 °C acumulados desde 1/jul. A estação atual é comparada com:
+
+- a normal de 1991–2020 (os 10% mais secos, a mediana e os 10% mais chuvosos)
+- os 5 anos cujo ONI, no mesmo trimestre, foi o mais próximo do atual
+
+Como é uma view, acompanha a `silver.weather_daily` a cada hora. O início da estação
+chuvosa (`gold.estacao_chuvosa`) é recalculado no job semanal. Na estação em curso
+ele é provisório e só aparece quando a chuva acumulada já passou 50 mm acima da média
+desde o mínimo.
+
+Em out/2026 havia um El Niño muito forte: o ONI de JAS chegou a +2,16, o maior para
+esse trimestre desde 1950. Os anos mais parecidos (1997–98 e 2015–16) estão bem
+abaixo, então a comparação com eles é extrapolação.
+
+**Cuidados**
+
+- **Estação chuvosa ano a ano:** o início calculado concorda pouco entre as fontes
+  (correlação ~0,3 do modelo com os pluviômetros e com o INMET). O valor de cada ano
+  é indicativo.
+- **INMET em 2026:** José Bonifácio e Valparaíso não têm chuva válida desde jul/2026,
+  e Lins quase não tem. Por isso a estação em curso usa só o modelo, e o INMET entra
+  apenas em anos com dados quase completos.
 
 ---
 

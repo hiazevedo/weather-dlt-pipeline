@@ -173,6 +173,19 @@ resources:
             notebook_path: /Workspace/Users/higor_com@hotmail.com/.bundle/weather-ml-rain-forecast/dev/files/01_feature_engineering
             source: WORKSPACE
 
+        # ENSO × clima de Birigui: estudo do impacto, previsibilidade, estação chuvosa
+        # (início provisório da estação em curso) e a view de acompanhamento da estação
+        - task_key: enso_impacto
+          max_retries: 1
+          description: "Atualiza gold.enso_impacto, enso_previsibilidade, estacao_chuvosa e a view estacao_vs_analogos"
+          depends_on:
+            - task_key: collect_enso
+            - task_key: ingest_inmet
+            - task_key: dlt_pipeline
+          notebook_task:
+            notebook_path: ${workspace.file_path}/12_enso_impacto
+            source: WORKSPACE
+
     # -------------------------------------------------------------------------
     # Job avulso: coleta histórica (executar manualmente uma única vez)
     # -------------------------------------------------------------------------

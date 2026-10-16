@@ -534,6 +534,155 @@
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC #### Estação chuvosa atual × normal × anos com ONI parecido
+# MAGIC > Chuva e dias com máxima ≥ 35 °C acumulados desde 1/jul (view `gold.estacao_vs_analogos`, que acompanha a `silver.weather_daily` a cada hora). Análogos: os 5 anos com o ONI do mesmo trimestre mais próximo do atual. Início da estação chuvosa pelo método de Liebmann (`gold.estacao_chuvosa`, recalculado no job semanal); na estação em curso ele é provisório.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Estação atual (desde 1/jul) vs normal 1991–2020 (view gold.estacao_vs_analogos, atualizada a cada hora)
+# MAGIC -- e início da estação chuvosa (gold.estacao_chuvosa, método de Liebmann; recalculado no job semanal)
+# MAGIC WITH v AS (
+# MAGIC   SELECT * FROM weather_pipeline.gold.estacao_vs_analogos
+# MAGIC   WHERE data = (SELECT MAX(data) FROM weather_pipeline.gold.estacao_vs_analogos WHERE tipo = 'atual')
+# MAGIC ),
+# MAGIC p AS (
+# MAGIC   SELECT
+# MAGIC     MAX(CASE WHEN tipo = 'atual'      THEN ano_estacao   END) AS ano,
+# MAGIC     MAX(CASE WHEN tipo = 'atual'      THEN chuva_acum_mm END) AS chuva,
+# MAGIC     MAX(CASE WHEN tipo = 'normal_p10' THEN chuva_acum_mm END) AS p10,
+# MAGIC     MAX(CASE WHEN tipo = 'normal_p50' THEN chuva_acum_mm END) AS p50,
+# MAGIC     MAX(CASE WHEN tipo = 'normal_p90' THEN chuva_acum_mm END) AS p90,
+# MAGIC     MAX(CASE WHEN tipo = 'atual'      THEN dias_35_acum  END) AS d35,
+# MAGIC     MAX(CASE WHEN tipo = 'normal_p50' THEN dias_35_acum  END) AS d35_n
+# MAGIC   FROM v
+# MAGIC ),
+# MAGIC ini AS (
+# MAGIC   SELECT
+# MAGIC     MAX(CASE WHEN e.provisorio AND e.ano_estacao = p.ano THEN e.inicio END)                        AS inicio,
+# MAGIC     PERCENTILE(CASE WHEN e.completa AND e.ano_estacao BETWEEN 1990 AND 2019 THEN e.inicio_dia END, 0.5) AS normal_dia
+# MAGIC   FROM weather_pipeline.gold.estacao_chuvosa e, p
+# MAGIC   WHERE e.fonte = 'ERA5'
+# MAGIC )
+# MAGIC SELECT
+# MAGIC   CONCAT(CAST(ROUND(chuva) AS INT), ' mm · ',
+# MAGIC     CASE WHEN chuva > p90 THEN '🟦 entre as 10% mais chuvosas'
+# MAGIC          WHEN chuva < p10 THEN '🟧 entre as 10% mais secas'
+# MAGIC          ELSE 'dentro do normal' END,
+# MAGIC     ' (mediana: ', CAST(ROUND(p50) AS INT), ' mm)')                                  AS `Chuva na estação`,
+# MAGIC   CONCAT(COALESCE(CONCAT(date_format(inicio, 'dd/MM'), ' (provisório)'), 'ainda não começou'),
+# MAGIC     ' · normal: ', date_format(date_add(make_date(ano, 7, 1), CAST(normal_dia AS INT)), 'dd/MM')) AS `Início da estação chuvosa`,
+# MAGIC   CONCAT(CAST(d35 AS INT), ' dias · normal até hoje: ', CAST(ROUND(d35_n) AS INT))  AS `Dias com máxima ≥ 35 °C`
+# MAGIC FROM p, ini
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Chuva acumulada desde 1/jul: estação atual × normal 1991–2020 (10% mais secas, mediana,
+# MAGIC -- 10% mais chuvosas) × mediana dos 5 anos com ONI mais parecido (view gold.estacao_vs_analogos)
+# MAGIC SELECT
+# MAGIC   data,
+# MAGIC   MAX(CASE WHEN tipo = 'atual'      THEN chuva_acum_mm END) AS atual,
+# MAGIC   MAX(CASE WHEN tipo = 'normal_p10' THEN chuva_acum_mm END) AS normal_p10,
+# MAGIC   MAX(CASE WHEN tipo = 'normal_p50' THEN chuva_acum_mm END) AS normal_p50,
+# MAGIC   MAX(CASE WHEN tipo = 'normal_p90' THEN chuva_acum_mm END) AS normal_p90,
+# MAGIC   MAX(CASE WHEN tipo = 'analogos'   THEN chuva_acum_mm END) AS analogos
+# MAGIC FROM weather_pipeline.gold.estacao_vs_analogos
+# MAGIC WHERE data <= date_add(DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')), 60)
+# MAGIC GROUP BY data
+# MAGIC ORDER BY data
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Estação atual × anos com ONI parecido (análogos) × normal: chuva e calor até a mesma data,
+# MAGIC -- início da estação chuvosa e totais do ano hidrológico (jul–jun)
+# MAGIC WITH hoje AS (SELECT MAX(data) AS d FROM weather_pipeline.gold.estacao_vs_analogos WHERE tipo = 'atual'),
+# MAGIC ate AS (
+# MAGIC   SELECT v.tipo, v.ano_estacao, v.serie, v.oni, v.trimestre_oni, v.chuva_acum_mm, v.dias_35_acum
+# MAGIC   FROM weather_pipeline.gold.estacao_vs_analogos v, hoje
+# MAGIC   WHERE v.data = hoje.d AND v.tipo IN ('atual', 'analogo', 'normal_p50')
+# MAGIC ),
+# MAGIC total AS (
+# MAGIC   SELECT tipo, ano_estacao, MAX(chuva_acum_mm) AS chuva, MAX(dias_35_acum) AS d35
+# MAGIC   FROM weather_pipeline.gold.estacao_vs_analogos
+# MAGIC   WHERE tipo IN ('analogo', 'normal_p50')
+# MAGIC   GROUP BY tipo, ano_estacao
+# MAGIC ),
+# MAGIC est AS (SELECT * FROM weather_pipeline.gold.estacao_chuvosa WHERE fonte = 'ERA5'),
+# MAGIC normal_ini AS (SELECT PERCENTILE(inicio_dia, 0.5) AS d FROM est WHERE completa AND ano_estacao BETWEEN 1990 AND 2019),
+# MAGIC atual AS (SELECT MAX(ano_estacao) AS ano FROM ate WHERE tipo = 'atual')
+# MAGIC SELECT
+# MAGIC   a.serie                                                                  AS `Estação`,
+# MAGIC   CASE WHEN a.oni IS NULL THEN '—'
+# MAGIC        ELSE CONCAT(CASE WHEN a.oni >= 0 THEN '+' ELSE '' END,
+# MAGIC                    REPLACE(FORMAT_NUMBER(a.oni, 1), '.', ','), ' (', a.trimestre_oni, ')') END AS `ONI`,
+# MAGIC   CAST(ROUND(a.chuva_acum_mm) AS INT)                                      AS `Chuva até hoje (mm)`,
+# MAGIC   CAST(ROUND(a.dias_35_acum) AS INT)                                       AS `Dias ≥ 35 °C até hoje`,
+# MAGIC   CASE WHEN a.tipo = 'normal_p50'
+# MAGIC          THEN date_format(date_add(make_date(atual.ano, 7, 1), CAST(normal_ini.d AS INT)), 'dd/MM')
+# MAGIC        WHEN e.inicio IS NULL THEN '—'
+# MAGIC        ELSE CONCAT(date_format(e.inicio, 'dd/MM'), CASE WHEN e.provisorio THEN ' (provisório)' ELSE '' END)
+# MAGIC   END                                                                      AS `Início da estação chuvosa`,
+# MAGIC   CAST(ROUND(t.chuva) AS INT)                                              AS `Chuva jul–jun (mm)`,
+# MAGIC   CAST(ROUND(t.d35) AS INT)                                                AS `Dias ≥ 35 °C jul–jun`
+# MAGIC FROM ate a
+# MAGIC CROSS JOIN atual
+# MAGIC CROSS JOIN normal_ini
+# MAGIC LEFT JOIN est e   ON e.ano_estacao = a.ano_estacao
+# MAGIC LEFT JOIN total t ON t.tipo = a.tipo AND t.ano_estacao <=> a.ano_estacao
+# MAGIC ORDER BY CASE a.tipo WHEN 'atual' THEN 0 WHEN 'analogo' THEN 1 ELSE 2 END, a.ano_estacao
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC #### O que o El Niño e a La Niña mudam em Birigui
+# MAGIC > Estudo `12_enso_impacto` (job semanal) em três fontes: modelo (ERA5, 1950+), pluviômetros do GHCN (1950–1997) e estações do INMET (2007+). O sinal é fraco: com El Niño chove um pouco mais de abril a outubro (estação seca) e quase nada muda no verão; nenhum resultado passa na correção para múltiplos testes, e o ONI não prevê o tercil do trimestre melhor que a climatologia.
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- Dá para prever o trimestre pela fase do ENSO? (gold.enso_previsibilidade: o ONI já publicado
+# MAGIC -- prevê o tercil — abaixo / normal / acima — melhor que a climatologia? Teste retroativo, cada ano de fora)
+# MAGIC SELECT CONCAT(
+# MAGIC   CASE WHEN SUM(CAST(tem_habilidade AS INT)) = 0 THEN '❌ Não: ' ELSE '✅ Em parte: ' END,
+# MAGIC   SUM(CAST(tem_habilidade AS INT)), ' de ', COUNT(*), ' testes batem a climatologia (melhor RPSS ',
+# MAGIC   REPLACE(FORMAT_NUMBER(MAX(rpss), 2), '.', ','), ')') AS `Previsibilidade`
+# MAGIC FROM weather_pipeline.gold.enso_previsibilidade
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- O que o El Niño e a La Niña mudam em Birigui (gold.enso_impacto): anomalia média do trimestre em que
+# MAGIC -- a fase ocorre × demais anos, sem a tendência de longo prazo. Chuva em % da normal.
+# MAGIC -- ✳️ = p < 0,05 isolado; com ~740 comparações, nenhum resultado passa na correção para múltiplos testes.
+# MAGIC WITH i AS (
+# MAGIC   SELECT ordem, trimestre, meses, fonte, grupo, metrica,
+# MAGIC          CONCAT(
+# MAGIC            CASE WHEN COALESCE(anomalia_pct, anomalia) >= 0 THEN '+' ELSE '' END,
+# MAGIC            CASE WHEN metrica = 'tmax_c'  THEN CONCAT(REPLACE(FORMAT_NUMBER(anomalia, 1), '.', ','), ' °C')
+# MAGIC                 WHEN metrica = 'dias_35' THEN CONCAT(REPLACE(FORMAT_NUMBER(anomalia, 1), '.', ','), ' dias')
+# MAGIC                 ELSE CONCAT(CAST(CAST(ROUND(anomalia_pct) AS INT) AS STRING), '%') END,
+# MAGIC            CASE WHEN p_valor < 0.05 THEN ' ✳️' ELSE '' END) AS txt
+# MAGIC   FROM weather_pipeline.gold.enso_impacto
+# MAGIC   WHERE trimestre <> 'estação chuvosa'
+# MAGIC )
+# MAGIC SELECT
+# MAGIC   CONCAT(trimestre, ' (', meses, ')')                                                                 AS `Trimestre`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · El Niño · modelo (1950+)`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'GHCN'  THEN txt END), '—')         AS `Chuva · El Niño · pluviômetros (1950–97)`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'INMET' THEN txt END), '—')         AS `Chuva · El Niño · INMET (2007+)`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · La Niña · modelo`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'GHCN'  THEN txt END), '—')         AS `Chuva · La Niña · pluviômetros`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'tmax_c'  AND fonte = 'ERA5' THEN txt END), '—') AS `Máxima · El Niño ≥ moderado`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'dias_35' AND fonte = 'ERA5' THEN txt END), '—') AS `Dias ≥ 35 °C · El Niño ≥ moderado`
+# MAGIC FROM i
+# MAGIC GROUP BY ordem, trimestre, meses
+# MAGIC ORDER BY ordem
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 9. Precipitação por Mês (média 1991–2020)
 
 # COMMAND ----------
