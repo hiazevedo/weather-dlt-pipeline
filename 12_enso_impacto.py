@@ -5,8 +5,10 @@
 # ganho na previsão horária. Aqui o efeito é medido por trimestre e na estação
 # chuvosa, em três fontes, para não depender só do modelo:
 #   ERA5    silver.weather_daily   1950→hoje   reanálise (Open-Meteo Archive)
-#   GHCN    silver.gauge_daily     1950–1997   chuva medida, postos até 20 km
+#   ANA     silver.ana_diaria      1950→2024   chuva medida, postos até 20 km (leitura diária)
 #   INMET   silver.inmet_hourly    2007→hoje   medido, 4 estações a 49–75 km
+# (os pluviômetros do GHCN, silver.gauge_daily, são os mesmos postos da ANA, só até
+# 1997 — entrariam em dobro)
 #
 # Roda para a cidade do config.py, como o resto do pipeline; as saídas levam a
 # coluna `cidade`.
@@ -80,11 +82,11 @@ era5 = spark.sql(f"""
     FROM {CATALOG}.silver.weather_daily
     WHERE cidade = '{CIDADE}' AND horas_registradas >= 23 AND year >= {ANO_INI} AND date < '{corte}'
 """).toPandas()
-ghcn = spark.sql(f"""
-    SELECT 'GHCN' AS fonte, station_id AS unidade, date, prcp_mm AS chuva_mm,
-           CAST(NULL AS DOUBLE) AS tmax_c
-    FROM {CATALOG}.silver.gauge_daily
-    WHERE cidade = '{CIDADE}' AND year(date) >= {ANO_INI}
+ana = spark.sql(f"""
+    SELECT 'ANA' AS fonte, station_id AS unidade, date, chuva_mm, CAST(NULL AS DOUBLE) AS tmax_c
+    FROM {CATALOG}.silver.ana_diaria
+    WHERE cidade = '{CIDADE}' AND year(date) >= {ANO_INI} AND date < '{corte}'
+      AND coalesce(status, '') NOT IN ('duvidoso', 'acumulado')
 """).toPandas()
 # INMET: dia local com quase todas as horas (o horário de verão, até 2019, dá dias de 23 e 25 h)
 inmet = spark.sql(f"""
@@ -96,7 +98,7 @@ inmet = spark.sql(f"""
     GROUP BY 1, 2, 3
 """).toPandas()
 
-diario = pd.concat([era5, ghcn, inmet], ignore_index=True).drop_duplicates(["fonte", "unidade", "date"])
+diario = pd.concat([era5, ana, inmet], ignore_index=True).drop_duplicates(["fonte", "unidade", "date"])
 diario["date"] = pd.to_datetime(diario["date"])
 diario[["chuva_mm", "tmax_c"]] = diario[["chuva_mm", "tmax_c"]].astype(float)
 print(diario.groupby("fonte").agg(unidades=("unidade", "nunique"), dias=("date", "size"),

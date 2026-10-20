@@ -103,6 +103,7 @@ weather-dlt-pipeline/
 ├── 10_ingest_inmet.py       # Estações automáticas do INMET (CSV no Volume) → silver.inmet_hourly
 ├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
 ├── 12_enso_impacto.py       # ENSO × clima de Birigui → gold.enso_impacto, enso_previsibilidade, estacao_chuvosa + views estacao_vs_analogos e acuracia_por_enso
+├── 13_collect_ana.py        # ANA: postos (leitura diária) e telemetria → silver.ana_* + view gold.ana_telemetria_qc
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
 ├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
 ├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
@@ -140,6 +141,7 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
 
   collect_enso           ← índice ONI da NOAA (mensal; independente)
   collect_previous_runs  ← previsões arquivadas d0/d1/d2 (base para MOS; independente)
+  collect_ana            ← postos e telemetria da ANA (independente)
   ingest_inmet           ← CSVs do INMET enviados pelo script local (independente)
 
   backfill_archive  ← regrava historical_<ano>.json até hoje − 5 dias (atraso do Archive)
@@ -148,7 +150,7 @@ Um segundo job roda **semanalmente** e mantém a série consistente:
        │
   rebuild_features  ← reconstrói gold.rain_features (bundle de ML)
 
-  enso_impacto      ← estudo do ENSO e estação chuvosa (depois de collect_enso, ingest_inmet e dlt_pipeline)
+  enso_impacto      ← estudo do ENSO e estação chuvosa (depois de collect_enso, collect_ana, ingest_inmet e dlt_pipeline)
 ```
 
 Ele fecha sozinho buracos deixados por falhas do job de hora em hora e troca, nas horas
@@ -163,9 +165,38 @@ usada no treino do modelo.
 | Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis) a cada hora | `silver.weather_forecast` |
 | Open-Meteo Previous Runs | O que cada rodada previu 0, 1 e 2 dias antes (desde 2024) | `silver.forecast_previous_runs` |
 | NOAA CPC | Índice ONI (El Niño / La Niña), global | `silver.enso_oni` |
-| NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997) | `silver.gauge_daily` |
+| NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997); são os mesmos postos da ANA, que vão até 2024 | `silver.gauge_daily` |
+| ANA (postos pluviométricos) | Chuva medida por dia em 27 postos num raio de 20 km; em Birigui, desde 1939 (chega à ANA com ~2 anos de atraso) | `silver.ana_diaria`, `silver.ana_estacoes` |
+| ANA (estações telemétricas) | Chuva a cada 10–30 min em estações num raio de 30 km, com qualidade irregular (ver abaixo) | `silver.ana_chuva_horaria`, `gold.ana_telemetria_qc` |
 | INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada 3 h | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
 | INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
+
+#### ANA: chuva medida em Birigui (postos e telemetria)
+
+O `13_collect_ana` (job semanal) usa o web service público da ANA, que responde de
+dentro do Databricks:
+
+- **Postos pluviométricos** num raio de 20 km (`silver.ana_diaria`): 27 postos, 23
+  com dados. O de Birigui (`02150015`, DAEE/SP Águas) mede desde 1939, e outros oito
+  seguem medindo até 2023–24. São leituras diárias, brutas, que chegam à ANA com
+  cerca de 2 anos de atraso. Os pluviômetros do GHCN (`silver.gauge_daily`) são estes
+  mesmos postos, só até 1997 (99,95% dos dias iguais).
+- **Estações telemétricas** num raio de 30 km (`silver.ana_chuva_horaria`): chuva a
+  cada 10 a 30 min, somada por hora. Birigui Urbano mandou dados de 2013 a 2021;
+  Coroados (5 km) manda desde mar/2025 e Buritama (24 km) desde 2016.
+
+O que os dados mostram:
+
+- **O Open-Meteo acerta o volume do mês em Birigui:** contra o posto da cidade, a
+  correlação mensal é 0,83 a 0,85 desde 1979, e o total bate (razão 1,01 a 1,06).
+- **Mas marca chuva em horas demais:** 13–14% das horas, contra 3,5–4,5% nas estações
+  telemétricas, como já tinha aparecido no INMET.
+- **A telemetria da região falha:** Coroados mandou 0 mm em meses de chuva (jan, mar e
+  jun/2026), e Buritama registrou 659 mm num único dia (13/nov/2025), quase 4 vezes a
+  chuva de 100 anos. Horas acima da chuva de 100 anos da IDF de Birigui (114 mm em
+  1 h, 174 mm em 24 h) ficam marcadas como `suspeita`, e a view `gold.ana_telemetria_qc`
+  mostra a situação de cada estação por mês. Por isso a telemetria ainda não alimenta
+  nenhuma análise nem o painel.
 
 #### INMET: por que um coletor local (celular Android)
 
@@ -220,7 +251,7 @@ a próxima hora: o ENSO age na escala de meses. O `12_enso_impacto` mede o efeit
 nessa escala, em três fontes independentes:
 
 - modelo (ERA5, 1950→hoje)
-- 11 pluviômetros do GHCN num raio de 20 km (1950–1997)
+- postos pluviométricos da ANA num raio de 20 km (1950–2024; os do GHCN são os mesmos, só até 1997)
 - 4 estações do INMET (2007→hoje)
 
 **Como**
@@ -243,11 +274,11 @@ nessa escala, em três fontes independentes:
 | Pergunta | Resposta |
 |---|---|
 | El Niño muda a chuva do verão (nov–mar)? | Não: −6% a +3% nas três fontes |
-| E a da estação seca (abr–set)? | Chove mais com El Niño: +17% a +39% no modelo, +15% a +20% nos pluviômetros e +33% a +73% no INMET (só 3 anos). Em mm é pouco: +15 a +54 mm por trimestre |
-| E a La Niña? | Fim da estação seca e primavera (jul–nov) um pouco mais secos: −9% a −21% no modelo e nos pluviômetros |
+| E a da estação seca (abr–set)? | Chove mais com El Niño: +17% a +39% no modelo, +20% a +28% nos pluviômetros e +33% a +73% no INMET (só 3 anos). Em mm é pouco: +16 a +54 mm por trimestre |
+| E a La Niña? | Fim da estação seca e primavera (jul–nov) um pouco mais secos: −8% a −21% no modelo e nos pluviômetros |
 | Calor? | El Niño moderado ou forte: máximas +0,3 a +0,4 °C e cerca de 1 dia a mais com ≥ 35 °C por trimestre, de set a jan; dentro do ruído |
 | Estação chuvosa? | O início não muda com o ENSO. No fim e na duração, modelo e pluviômetros discordam até no sinal |
-| Algum resultado sobrevive à correção? | Não: das 737 comparações, 42 têm p < 0,05 (o acaso daria ~37) e nenhuma tem q < 0,10 |
+| Algum resultado sobrevive à correção? | Não: das 745 comparações, 54 têm p < 0,05, um pouco mais do que o acaso daria (~37), mas nenhuma tem q < 0,10 |
 | Dá para prever o trimestre pelo ONI? | Não: 0 de 490 combinações (trimestre × variável × antecedência) batem a climatologia; o melhor RPSS é 0,07 |
 | A previsão erra mais com El Niño? | Até agora, não. Na API Open-Meteo, o F1 é 0,49 com El Niño e 0,50 sem, na rodada de 1 dia antes; na de 2 dias antes, 0,46 e 0,49. A comparação usa os 10 meses do calendário com dados nas duas situações (El Niño em jan–abr/2024 e mai–out/2026). O champion ainda não tem meses fora do El Niño |
 
@@ -298,7 +329,7 @@ aparece no painel assim que houver meses sem El Niño.
 **Cuidados**
 
 - **Estação chuvosa ano a ano:** o início calculado concorda pouco entre as fontes
-  (correlação ~0,3 do modelo com os pluviômetros e com o INMET). O valor de cada ano
+  (correlação 0,35 do modelo com os postos da ANA e ~0,3 com o INMET). O valor de cada ano
   é indicativo.
 - **INMET em 2026:** José Bonifácio e Valparaíso não têm chuva válida desde jul/2026,
   e Lins quase não tem. Por isso a estação em curso usa só o modelo, e o INMET entra

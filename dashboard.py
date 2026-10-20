@@ -637,7 +637,7 @@
 
 # MAGIC %md
 # MAGIC #### O que o El Niño e a La Niña mudam em Birigui
-# MAGIC > Estudo `12_enso_impacto` (job semanal) em três fontes: modelo (ERA5, 1950+), pluviômetros do GHCN (1950–1997) e estações do INMET (2007+). O sinal é fraco: com El Niño chove um pouco mais de abril a outubro (estação seca) e quase nada muda no verão; nenhum resultado passa na correção para múltiplos testes, e o ONI não prevê o tercil do trimestre melhor que a climatologia.
+# MAGIC > Estudo `12_enso_impacto` (job semanal) em três fontes: modelo (ERA5, 1950+), postos pluviométricos da ANA (leitura diária, 1950–2024) e estações do INMET (2007+). O sinal é fraco: com El Niño chove um pouco mais de abril a outubro (estação seca) e quase nada muda no verão; nenhum resultado passa na correção para múltiplos testes, e o ONI não prevê o tercil do trimestre melhor que a climatologia.
 
 # COMMAND ----------
 
@@ -670,10 +670,10 @@
 # MAGIC SELECT
 # MAGIC   CONCAT(trimestre, ' (', meses, ')')                                                                 AS `Trimestre`,
 # MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · El Niño · modelo (1950+)`,
-# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'GHCN'  THEN txt END), '—')         AS `Chuva · El Niño · pluviômetros (1950–97)`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'ANA'   THEN txt END), '—')         AS `Chuva · El Niño · pluviômetros (1950–2024)`,
 # MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'INMET' THEN txt END), '—')         AS `Chuva · El Niño · INMET (2007+)`,
 # MAGIC   COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · La Niña · modelo`,
-# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'GHCN'  THEN txt END), '—')         AS `Chuva · La Niña · pluviômetros`,
+# MAGIC   COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'ANA'   THEN txt END), '—')         AS `Chuva · La Niña · pluviômetros`,
 # MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'tmax_c'  AND fonte = 'ERA5' THEN txt END), '—') AS `Máxima · El Niño ≥ moderado`,
 # MAGIC   COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'dias_35' AND fonte = 'ERA5' THEN txt END), '—') AS `Dias ≥ 35 °C · El Niño ≥ moderado`
 # MAGIC FROM i
