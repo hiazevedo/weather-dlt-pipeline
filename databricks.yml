@@ -30,8 +30,17 @@ resources:
         timezone_id: "America/Sao_Paulo"
         pause_status: UNPAUSED
 
+      # Uma execução leva ~6 min; passar de 30 min indica algo travado
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 1800
+
       email_notifications:
         on_failure:
+          - ${workspace.current_user.userName}
+        on_duration_warning_threshold_exceeded:
           - ${workspace.current_user.userName}
 
       tasks:
@@ -208,4 +217,30 @@ resources:
           description: "Coleta 86 anos de dados históricos da Open-Meteo Archive API"
           notebook_task:
             notebook_path: ${workspace.file_path}/01_collect_history
+            source: WORKSPACE
+
+    # -------------------------------------------------------------------------
+    # Vigia: falha (→ e-mail) quando o job de 1h, a coleta da previsão, o
+    # celular (sinal de vida) ou o backfill semanal param. Cada problema
+    # alerta uma vez e repete a cada 12 h enquanto durar (gold.vigia_alertas).
+    # Não cobre o caso de o Databricks bloquear todas as execuções.
+    # -------------------------------------------------------------------------
+    vigia:
+      name: "[weather] Vigia (a cada 3 h)"
+      schedule:
+        quartz_cron_expression: "0 40 */3 * * ?"
+        timezone_id: "America/Sao_Paulo"
+        pause_status: UNPAUSED
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      tasks:
+        - task_key: vigia
+          # 0 é omitido no deploy e o serverless repete a task; o 14_vigia trata isso
+          max_retries: 0
+          description: "Confere se as coletas e o pipeline continuam vivos"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/14_vigia
             source: WORKSPACE
