@@ -239,7 +239,7 @@
 # MAGIC   ROUND(CAST(o.precipitation AS DOUBLE), 1)              AS chuva_real_mm
 # MAGIC FROM ultima u
 # MAGIC LEFT JOIN weather_pipeline.silver.weather_clean o
-# MAGIC   ON o.observation_time = u.target_time AND o.is_forecast = false
+# MAGIC   ON o.observation_time = u.target_time AND o.observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')
 # MAGIC WHERE u.rn = 1
 # MAGIC ORDER BY u.target_time
 

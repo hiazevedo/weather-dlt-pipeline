@@ -58,6 +58,10 @@ HOURLY_VARS_EXTRA = ["dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover
                      "total_column_integrated_water_vapour", "boundary_layer_height"]
 HOURLY_VARS = HOURLY_VARS_BASE + HOURLY_VARS_EXTRA
 
+# Só na previsão (o Archive não tem probabilidade): a chance de chuva da própria
+# Open-Meteo (ensemble) e as rajadas — vão para o painel, não para o modelo.
+HOURLY_VARS_FORECAST = HOURLY_VARS + ["precipitation_probability", "wind_gusts_10m"]
+
 # Modelo do Archive para a série histórica: "best_match" (ERA5 até 2017 e
 # IFS a partir de 2018) ou "era5" (fonte única) — ver 10_experiment_fonte_historica
 ARCHIVE_MODEL = "best_match"

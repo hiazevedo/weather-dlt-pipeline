@@ -118,7 +118,7 @@ spark.sql(f"""
     ),
     obs AS (
         SELECT observation_time, precipitation
-        FROM weather_pipeline.silver.weather_clean WHERE NOT is_forecast
+        FROM weather_pipeline.silver.weather_clean WHERE observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')
     ),
     obs_agg AS (
         SELECT av.id,

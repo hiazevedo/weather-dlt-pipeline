@@ -434,7 +434,7 @@ spark.sql(f"""
     WITH obs AS (
         SELECT observation_time, precipitation AS chuva_obs, temperature_2m AS temp_obs
         FROM {CATALOG}.silver.weather_clean
-        WHERE NOT is_forecast AND cidade = '{CIDADE}'
+        WHERE observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo') AND cidade = '{CIDADE}'
     ),
     api AS (                     -- previsões arquivadas: rodadas de 1 e de 2 dias antes (a do próprio dia, d0,
                                  -- é a mesma série do rótulo observado e daria acerto perfeito)

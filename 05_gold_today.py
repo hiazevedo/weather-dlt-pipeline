@@ -19,7 +19,7 @@ print(f"   Data hoje  : {hoje}")
 print(f"   Hora atual : {agora_h}h (Brasília)")
 
 # Dia inteiro (hoje + amanhã) = observado + previsão, da silver.weather_clean
-# (já deduplicada por hora, com is_forecast calculado no fuso local).
+# (já deduplicada por hora, sem is_forecast: filtre por observation_time contra o agora local).
 # Usa variável Python `hoje` (America/Sao_Paulo) para evitar divergência
 # com CURRENT_DATE() do cluster que opera em UTC
 from datetime import timedelta as _td
@@ -55,7 +55,7 @@ df_clima_hoje = spark.sql(f"""
         ROUND(AVG(relative_humidity),2) AS humidity_climatologica
     FROM weather_pipeline.silver.weather_clean, ref
     WHERE year BETWEEN 1991 AND 2020
-      AND is_forecast = false
+      AND observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')
       AND LEAST(ABS(DAYOFYEAR(observation_time) - ref.doy),
                 365 - ABS(DAYOFYEAR(observation_time) - ref.doy)) <= 7
     GROUP BY hour

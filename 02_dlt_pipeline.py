@@ -1,6 +1,5 @@
 # Databricks notebook source
 import dlt
-from datetime import datetime, timedelta
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import (
@@ -13,7 +12,12 @@ from pyspark.sql.types import (
 # BRONZE: Leitura raw dos JSONs do Volume
 RAW_PATH = "/Volumes/weather_pipeline/bronze/raw_json"
 TZ_LOCAL = "America/Sao_Paulo"  # fuso de observation_time (vem da Open-Meteo)
-FORECAST_JANELA_DIAS = 16       # arquivos de previsão lidos pelo weather_raw (ver weather_raw)
+
+
+def AGORA_LOCAL():
+    # observation_time é hora LOCAL (America/Sao_Paulo) sem fuso; current_timestamp()
+    # é UTC, então converte. Usar sempre dentro de filter/WHERE.
+    return F.from_utc_timestamp(F.current_timestamp(), TZ_LOCAL)
 
 hourly_schema = StructType([
     StructField("time",                  ArrayType(StringType()),  True),
@@ -33,6 +37,9 @@ hourly_schema = StructType([
     StructField("wind_direction_10m",    ArrayType(FloatType()),   True),
     StructField("total_column_integrated_water_vapour", ArrayType(FloatType()), True),
     StructField("boundary_layer_height", ArrayType(FloatType()),   True),
+    # só nos forecast_*.json (o Archive não tem) → null no histórico
+    StructField("precipitation_probability", ArrayType(FloatType()), True),
+    StructField("wind_gusts_10m",        ArrayType(FloatType()),   True),
 ])
 data_schema = StructType([
     StructField("hourly", hourly_schema, True),
@@ -47,40 +54,34 @@ root_schema = StructType([
 
 @dlt.table(
     name    = "weather_raw",
-    comment = "Dados meteorológicos raw — Birigui-SP 1940→presente",
+    comment = "Dados meteorológicos raw — Birigui-SP 1940→presente (streaming, Auto Loader)",
     table_properties = {
         "quality": "bronze",
         "pipelines.autoOptimize.managed": "true"
     }
 )
 def weather_raw():
-    # Todo o histórico (historical_*.json, Archive) + só os arquivos de previsão
-    # recentes. Com a coleta de hora em hora entram 24 forecast_*.json por dia;
-    # os antigos já estão cobertos pelo Archive (o backfill semanal vai até
-    # hoje − 5 dias, então 16 dias de previsões cobrem a pior janela entre
-    # backfills, com folga). Sem isso o DLT ficaria mais lento a cada hora.
-    def ler(padrao, **opcoes):
-        df = spark.read.format("json").schema(root_schema).option("pathGlobFilter", padrao)
-        for k, v in opcoes.items():
-            df = df.option(k, v)
-        # _metadata (coluna oculta) é lido antes do union, onde ela não sobrevive
-        return df.load(RAW_PATH).withColumn("_source_file", F.col("_metadata.file_path"))
-
-    desde = (datetime.utcnow() - timedelta(days=FORECAST_JANELA_DIAS)).strftime("%Y-%m-%dT%H:%M:%S")
+    # Auto Loader: só os arquivos novos entram a cada execução (tabela streaming,
+    # incremental). allowOverwrites porque o backfill semanal reescreve
+    # historical_<ano>.json no mesmo caminho — sem isso o arquivo atualizado seria
+    # ignorado. Linhas repetidas são resolvidas no silver (apply_changes).
     return (
-        ler("historical_*.json").unionByName(ler("forecast_*.json", modifiedAfter=desde))
-        .withColumn("_ingested_at",  F.current_timestamp())
-        .withColumn("is_forecast",
-            F.col("_source_file").contains("forecast").cast("boolean"))
+        spark.readStream.format("cloudFiles")
+        .option("cloudFiles.format", "json")
+        .option("cloudFiles.allowOverwrites", "true")
+        .schema(root_schema)
+        .load(RAW_PATH)
+        .withColumn("_source_file", F.col("_metadata.file_path"))
+        .withColumn("_ingested_at", F.current_timestamp())
+        .withColumn("is_historical", F.col("_source_file").contains("historical"))
     )
 
 # COMMAND ----------
 
 # SILVER: Explode + limpeza + validações DLT
-@dlt.table(
-    name    = "weather_clean",
-    comment = "Dados horários limpos com validações de qualidade",
-    table_properties = {"quality": "silver"}
+@dlt.view(
+    name    = "weather_hourly_stage",
+    comment = "Explode dos arrays horários + validações; a deduplicação é feita em weather_clean"
 )
 @dlt.expect("temperatura_valida",      "temperature_2m BETWEEN -10 AND 50")
 @dlt.expect("sensacao_valida",         "apparent_temperature BETWEEN -15 AND 60")
@@ -89,9 +90,9 @@ def weather_raw():
 @dlt.expect("ano_valido",              "year >= 1940 AND year <= 2100")
 @dlt.expect("mes_valido",              "month BETWEEN 1 AND 12")
 @dlt.expect("hora_valida",             "hour BETWEEN 0 AND 23")
-def weather_clean():
+def weather_hourly_stage():
     return (
-        dlt.read("weather_raw")
+        dlt.read_stream("weather_raw")
 
         # Explodir arrays em linhas individuais (uma por hora)
         .withColumn("idx",
@@ -124,16 +125,11 @@ def weather_clean():
         .withColumn("wind_direction_10m", F.col("data.hourly.wind_direction_10m")[F.col("idx")])
         .withColumn("tcwv",               F.col("data.hourly.total_column_integrated_water_vapour")[F.col("idx")])
         .withColumn("boundary_layer_height", F.col("data.hourly.boundary_layer_height")[F.col("idx")])
+        .withColumn("precipitation_probability", F.col("data.hourly.precipitation_probability")[F.col("idx")])
+        .withColumn("wind_gusts_10m",     F.col("data.hourly.wind_gusts_10m")[F.col("idx")])
 
         # Filtra linhas sem precipitation válido
         .filter(~F.isnan(F.col("precipitation")) & F.col("precipitation").isNotNull())
-
-        # Reclassificar is_forecast por tempo (horas passadas = observação real).
-        # observation_time é a hora LOCAL (America/Sao_Paulo) sem fuso; compará-la
-        # com current_timestamp() (UTC) errava a fronteira em 3h.
-        .withColumn("is_forecast",
-            (F.col("observation_time") >
-             F.from_utc_timestamp(F.current_timestamp(), TZ_LOCAL)).cast("boolean"))
 
         # Features temporais
         .withColumn("year",    F.year("observation_time"))
@@ -156,28 +152,42 @@ def weather_clean():
              .when(F.col("precipitation") <  10,   "Chuva moderada")
              .when(F.col("precipitation") <  50,   "Chuva forte")
              .otherwise("Chuva muito forte"))
-        # Deduplicar por hora: cada forecast_*.json repete 7 dias de passado.
-        # Prioridade: arquivo histórico (Archive API) > forecast mais recente.
-        .withColumn("_rn", F.row_number().over(
-            Window.partitionBy("observation_time").orderBy(
-                F.col("_source_file").contains("historical").desc(),
-                F.col("collected_at").desc(),
-            )))
-        .filter(F.col("_rn") == 1)
+        # Chave de desempate para apply_changes: arquivo histórico (Archive API)
+        # vence qualquer forecast; entre iguais, vence o collected_at mais recente.
+        .withColumn("_seq", F.struct(
+            F.col("is_historical").cast("int").alias("hist"),
+            F.col("collected_at").alias("coletado")))
 
-        # Selecionar colunas finais
         .select(
             "observation_time", "cidade", "latitude", "longitude",
             "temperature_2m", "apparent_temperature",
             "precipitation", "rain", "relative_humidity", "windspeed",
             "dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover_low",
             "cloud_cover_mid", "cloud_cover_high", "wind_direction_10m", "tcwv",
-            "boundary_layer_height",
-            "temp_class", "rain_class", "is_forecast",
+            "boundary_layer_height", "precipitation_probability", "wind_gusts_10m",
+            "temp_class", "rain_class",
             "year", "month", "day", "hour", "weekday", "quarter",
-            "_source_file", "_ingested_at"
+            "_source_file", "_ingested_at", "_seq"
         )
     )
+
+# Silver: uma linha por hora (observation_time), incremental via apply_changes.
+# Não tem coluna is_forecast: ela depende do relógio (non-deterministic) e
+# forçava recompute total. Quem consome filtra por observation_time contra
+# "agora" no fuso local (ver AGORA_LOCAL nos gold abaixo).
+dlt.create_streaming_table(
+    name    = "weather_clean",
+    comment = "Dados horários limpos, uma linha por hora (histórico tem prioridade sobre previsão)",
+    table_properties = {"quality": "silver"}
+)
+dlt.apply_changes(
+    target             = "weather_clean",
+    source             = "weather_hourly_stage",
+    keys               = ["observation_time"],
+    sequence_by        = "_seq",
+    except_column_list = ["_seq"],
+    stored_as_scd_type = 1
+)
 
 # COMMAND ----------
 
@@ -190,7 +200,7 @@ def weather_clean():
 def weather_daily():
     return (
         dlt.read("weather_clean")
-        .filter(F.col("is_forecast") == False)
+        .filter(F.col("observation_time") <= AGORA_LOCAL())
         .groupBy("cidade", "year", "month", "day",
                  F.to_date("observation_time").alias("date"))
         .agg(
@@ -253,7 +263,7 @@ def weather_forecast():
 
     return (
         dlt.read("weather_clean")
-        .filter(F.col("is_forecast") == True)
+        .filter(F.col("observation_time") > AGORA_LOCAL())
         .withColumn("rn", F.row_number().over(window))
         .filter(F.col("rn") == 1)
         .drop("rn")
@@ -263,7 +273,7 @@ def weather_forecast():
             "precipitation", "rain", "relative_humidity", "windspeed",
             "dew_point_2m", "pressure_msl", "cloud_cover", "cloud_cover_low",
             "cloud_cover_mid", "cloud_cover_high", "wind_direction_10m", "tcwv",
-            "boundary_layer_height",
+            "boundary_layer_height", "precipitation_probability", "wind_gusts_10m",
             "temp_class", "rain_class",
             "year", "month", "day", "hour",
             "_ingested_at"
