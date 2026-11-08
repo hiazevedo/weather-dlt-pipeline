@@ -28,14 +28,14 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
            │  Delta Live Tables
            ▼
 ┌─────────────────────┐
-│  @dlt.table         │  weather_raw
-│  BRONZE             │  87 arquivos JSON
-└──────────┬──────────┘  @dlt.expect validações
-           │
+│  streaming table    │  weather_raw
+│  BRONZE             │  Auto Loader (só arquivos novos)
+└──────────┬──────────┘
+           │  view weather_hourly_stage: explode + @dlt.expect
            ▼
 ┌─────────────────────┐
-│  @dlt.table         │  weather_clean
-│  SILVER             │  756K registros horários
+│  apply_changes      │  weather_clean
+│  SILVER             │  761K horas, uma linha por hora
 └──────────┬──────────┘  temp_class, rain_class, features temporais
            │
      ┌─────┴─────────────┐
@@ -62,8 +62,8 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
 
 | Tabela | Camada | Registros | Descrição |
 |--------|--------|-----------|-----------|
-| `weather_raw` | Bronze | 87 arquivos | JSON raw com validações |
-| `weather_clean` | Silver | 756K horas | Dados limpos + classificações |
+| `weather_raw` | Bronze | ~860 arquivos | JSON raw (streaming table, Auto Loader) |
+| `weather_clean` | Silver | 761K horas | Dados limpos + classificações; uma linha por hora (`apply_changes`) |
 | `weather_daily` | Gold | 31K dias | Resumo diário histórico |
 | `weather_monthly` | Gold | 1K meses | Climatologia mensal |
 | `weather_forecast` | Gold | 168h | Previsão próximas 48h |
@@ -109,6 +109,7 @@ weather-dlt-pipeline/
 ├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
 ├── scripts/termux/          # Instalação e agendamento no celular Android (Termux + cron)
 ├── dashboard.py             # Notebook de dashboard Databricks SQL
+├── dashboards/              # Definição do painel Lakeview (export do publicado)
 └── analyze_tables.py        # Inspeção e exploração das tabelas Delta
 ```
 
@@ -116,7 +117,7 @@ weather-dlt-pipeline/
 
 ## Workflow automatizado
 
-Pipeline roda automaticamente **a cada hora** via Databricks Workflows, configurado no `databricks.yml` (o DLT lê todo o histórico e só os arquivos de previsão dos últimos 16 dias, então o custo não cresce com o tempo):
+Pipeline roda automaticamente **a cada hora** via Databricks Workflows, configurado no `databricks.yml`. O DLT é incremental: o Auto Loader só lê os arquivos novos, a silver é atualizada por `apply_changes` e as golds não fazem recálculo completo, então o custo não cresce com o tempo:
 
 ```
 [weather] Pipeline Completo (1h)
@@ -168,7 +169,7 @@ usada no treino do modelo.
 | NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997); são os mesmos postos da ANA, que vão até 2024 | `silver.gauge_daily` |
 | ANA (postos pluviométricos) | Chuva medida por dia em 27 postos num raio de 20 km; em Birigui, desde 1939 (chega à ANA com ~2 anos de atraso) | `silver.ana_diaria`, `silver.ana_estacoes` |
 | ANA (estações telemétricas) | Chuva a cada 10–30 min em estações num raio de 30 km, com qualidade irregular (ver abaixo) | `silver.ana_chuva_horaria`, `gold.ana_telemetria_qc` |
-| INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada 3 h | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
+| INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada hora | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
 | INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
 
 #### ANA: chuva medida em Birigui (postos e telemetria)
@@ -214,7 +215,7 @@ usa a API REST (`scripts/dbx.py`).
   o pacote muda).
 - `10_ingest_inmet` (task `ingest_inmet` do job semanal) gera `silver.inmet_hourly`
   em hora local.
-- Avisos: `scripts/inmet_avisos_sync.py` (cron do celular, a cada 3 h) baixa os
+- Avisos: `scripts/inmet_avisos_sync.py` (cron do celular, a cada hora) baixa os
   avisos ativos e futuros da UF, envia
   um snapshot ao Volume `bronze.inmet_avisos` quando algo muda e dispara o
   `11_ingest_avisos`, que também roda no job semanal como reforço.
@@ -337,18 +338,21 @@ aparece no painel assim que houver meses sem El Niño.
 
 ---
 
-## Dashboard — Previsão do Tempo Birigui-SP
+## Dashboard — Previsão de Chuva · Birigui
 
-Dashboard Databricks SQL atualizado automaticamente com:
+Painel Lakeview (AI/BI) com 3 páginas. A definição fica versionada em
+[`dashboards/previsao_chuva_birigui.lvdash.json`](dashboards/previsao_chuva_birigui.lvdash.json)
+(export do painel publicado; ao mudar o painel na interface, exporte de novo).
 
-| Widget | Tipo | Dados |
-|--------|------|-------|
-| Vai Chover Hoje? | Counter | gold.rain_alert |
-| Temperatura Máx/Mín | Counter | gold.rain_alert |
-| Temperatura do Dia | Line chart | gold.weather_today |
-| Precipitação + Umidade | Bar chart | gold.rain_alert |
-| Umidade Relativa | Line chart | gold.weather_today |
-| Probabilidade ML | Line chart | gold.rain_forecast_ml |
+| Página | O que mostra |
+|---|---|
+| **Agora** | Chance de chuva da Open-Meteo (próxima hora e próximas 6 h), champion e regional no limiar de cada um, máx/mín, avisos do INMET, status do pipeline e do celular, chuva no mês e em 7 dias, próximas 48 h (mm e chance), próximos 7 dias (máx, mín, chuva, chance, rajada), temperatura de hoje × normal e a estação chuvosa |
+| **Modelo** | Modelo × realidade (−6 h a +18 h), desempenho em produção, no teste e contra chuva medida, acurácia por antecedência e a tabela hora a hora |
+| **Clima e ENSO** | ONI, estação atual × normal × análogos, o estudo do ENSO e a climatologia 1991–2020 (dia com chuva = ≥ 1 mm) |
+
+O status do celular vem do sinal de vida que o `inmet_avisos_sync.py` grava a cada
+hora em `/Volumes/weather_pipeline/bronze/coletores/celular.json`: 🔴 depois de
+2,5 h sem contato.
 
 ---
 
@@ -408,8 +412,8 @@ Volume  : /Volumes/weather_pipeline/bronze/raw_json
 
 ## Decisões técnicas
 
-**Por que `is_forecast` é classificado por tempo e não pelo nome do arquivo?**
-Os arquivos `forecast_*.json` coletados pela API incluem os últimos 7 dias de observações reais junto com a previsão futura. Classificar pelo nome do arquivo marcava dados históricos recentes como previsão, criando um gap no histórico. A solução correta é: `observation_time > current_timestamp()` — horas passadas são observações reais, horas futuras são previsão.
+**Por que a `weather_clean` não tem coluna `is_forecast`?**
+Os `forecast_*.json` trazem os últimos 7 dias junto com a previsão, então "é previsão" depende da hora atual, e não do arquivo. Uma coluna calculada com `current_timestamp()` tornava a silver não determinística e obrigava o DLT a recalcular tudo a cada hora. Quem consome filtra na consulta: `observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')` para o observado e `>` para a previsão (`observation_time` é hora local, sem fuso).
 
 **Por que `past_days=7` na coleta de forecast?**
 Garante que cada execução do Workflow recoleta os últimos 7 dias de dados observados, preenchendo automaticamente qualquer gap caso o pipeline fique offline por alguns dias.

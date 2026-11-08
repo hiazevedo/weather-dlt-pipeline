@@ -1,0 +1,3187 @@
+{
+  "datasets": [
+    {
+      "name": "041621a7",
+      "displayName": "Vai chover na próxima hora? (modelo)",
+      "queryLines": [
+        "SELECT CONCAT(\n",
+        "  CASE WHEN prob_chuva >= threshold_usado THEN '🌧️ Sim · ' ELSE '☀️ Não · ' END,\n",
+        "  CAST(ROUND(prob_chuva * 100) AS INT), '% às ', LPAD(CAST(HOUR(target_time) AS STRING), 2, '0'),\n",
+        "  'h (limiar ', CAST(ROUND(threshold_usado * 100) AS INT), '%)') AS `Próxima Hora`\n",
+        "FROM weather_pipeline.gold.rain_forecast_ml\n",
+        "WHERE target_time = (\n",
+        "  SELECT MIN(target_time) FROM weather_pipeline.gold.rain_forecast_ml\n",
+        "  WHERE target_time > from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')\n",
+        ")\n"
+      ]
+    },
+    {
+      "name": "a11b61da",
+      "displayName": "Resumo de Alertas — hoje e amanhã",
+      "queryLines": [
+        "WITH modelo AS (\n",
+        "  -- última previsão feita antes de cada hora-alvo (mesma regra da view de acurácia)\n",
+        "  SELECT target_time, prob_chuva, prob_chuva_medida, threshold_regional,\n",
+        "         ROW_NUMBER() OVER (PARTITION BY target_time ORDER BY inferencia_local DESC) AS rn\n",
+        "  FROM weather_pipeline.gold.rain_forecast_ml_history\n",
+        "  WHERE inferencia_local < target_time\n",
+        ")\n",
+        "SELECT\n",
+        "  CONCAT(DATE_FORMAT(wt.observation_time, 'dd/MM'), ' ',\n",
+        "         LPAD(CAST(wt.hour AS STRING), 2, '0'), 'h')               AS `Quando`,\n",
+        "  CASE WHEN wt.is_past THEN '✅ Observado' ELSE '🔮 Previsão' END  AS `Tipo`,\n",
+        "  ROUND(CAST(wt.temperature_2m AS DOUBLE), 1)                       AS `Temp (°C)`,\n",
+        "  ROUND(CAST(wt.apparent_temperature AS DOUBLE), 1)                 AS `Sensação (°C)`,\n",
+        "  CASE\n",
+        "    WHEN wt.temp_climatologica IS NULL THEN '—'\n",
+        "    ELSE CONCAT(\n",
+        "      CASE WHEN wt.temperature_2m - wt.temp_climatologica >=  2 THEN '🔴 '\n",
+        "           WHEN wt.temperature_2m - wt.temp_climatologica <= -2 THEN '🔵 '\n",
+        "           ELSE '⚪ ' END,\n",
+        "      CASE WHEN wt.temperature_2m >= wt.temp_climatologica THEN '+' ELSE '' END,\n",
+        "      ROUND(wt.temperature_2m - wt.temp_climatologica, 1))\n",
+        "  END                                                               AS `Diferença p/ média histórica (°C)`,\n",
+        "  wt.temp_class                                                     AS `Faixa de temperatura`,\n",
+        "  CASE\n",
+        "    WHEN wt.precipitation IS NULL THEN '—'\n",
+        "    WHEN wt.precipitation = 0    THEN 'Sem chuva'\n",
+        "    ELSE CONCAT(ROUND(CAST(wt.precipitation AS DOUBLE), 1), ' mm · ', wt.rain_class)\n",
+        "  END                                                               AS `Chuva`,\n",
+        "  ROUND(CAST(wt.relative_humidity AS DOUBLE), 0)                    AS `Umidade (%)`,\n",
+        "  CASE\n",
+        "    WHEN m.prob_chuva IS NULL THEN '—'\n",
+        "    ELSE CONCAT(\n",
+        "      CASE WHEN m.prob_chuva >= 0.85 THEN '🔴 '\n",
+        "           WHEN m.prob_chuva >= 0.65 THEN '🟠 '\n",
+        "           WHEN m.prob_chuva >= 0.40 THEN '🟡 '\n",
+        "           ELSE '🟢 ' END,\n",
+        "      CAST(ROUND(m.prob_chuva * 100) AS INT), '%')\n",
+        "  END                                                               AS `Modelo (chance de chuva)`,\n",
+        "  CASE\n",
+        "    WHEN m.prob_chuva_medida IS NULL THEN '—'\n",
+        "    ELSE CONCAT(\n",
+        "      CASE WHEN m.prob_chuva_medida >= 0.9 THEN '🔴 '\n",
+        "           WHEN m.prob_chuva_medida >= m.threshold_regional THEN '🟠 '\n",
+        "           WHEN m.prob_chuva_medida >= m.threshold_regional - 0.2 THEN '🟡 '\n",
+        "           ELSE '🟢 ' END,\n",
+        "      CAST(ROUND(m.prob_chuva_medida * 100) AS INT), '%')\n",
+        "  END                                                               AS `Regional (chuva medida)`\n",
+        "FROM weather_pipeline.gold.weather_today wt\n",
+        "LEFT JOIN modelo m\n",
+        "  ON m.target_time = wt.observation_time AND m.rn = 1\n",
+        "ORDER BY wt.observation_time"
+      ],
+      "catalog": "weather_pipeline",
+      "schema": "gold"
+    },
+    {
+      "name": "0d8e8691",
+      "displayName": "Modelo vs Realidade (−6h a +18h)",
+      "queryLines": [
+        "WITH ultima AS (\n",
+        "  SELECT *, ROW_NUMBER() OVER (PARTITION BY target_time ORDER BY inferencia_local DESC) AS rn\n",
+        "  FROM weather_pipeline.gold.rain_forecast_ml_history\n",
+        "  WHERE target_time >  date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - INTERVAL 6 HOURS\n",
+        "    AND target_time <= date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) + INTERVAL 18 HOURS\n",
+        ")\n",
+        "SELECT\n",
+        "  u.target_time                                          AS observation_time,\n",
+        "  CAST((unix_timestamp(u.target_time) - unix_timestamp(date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')))) / 3600 AS INT) AS horas_rel,\n",
+        "  HOUR(u.target_time)                                    AS hora,\n",
+        "  ROUND(u.prob_chuva * 100, 1)                           AS prob_modelo_pct,\n",
+        "  ROUND(u.prob_chuva_medida * 100, 1)                    AS prob_regional_pct,\n",
+        "  u.threshold_usado * 100                                AS threshold_pct,\n",
+        "  CASE WHEN o.precipitation > 0 THEN 100\n",
+        "       WHEN o.precipitation = 0 THEN 0 END               AS choveu_real,\n",
+        "  ROUND(CAST(o.precipitation AS DOUBLE), 1)              AS chuva_real_mm\n",
+        "FROM ultima u\n",
+        "LEFT JOIN weather_pipeline.silver.weather_clean o\n",
+        "  ON o.observation_time = u.target_time AND o.observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')\n",
+        "WHERE u.rn = 1\n",
+        "ORDER BY u.target_time"
+      ]
+    },
+    {
+      "name": "a8420f1c",
+      "displayName": "Desempenho: produção, API, teste e chuva medida (INMET)",
+      "queryLines": [
+        "-- Produção: horas com chuva observada em que há previsão do modelo E da API\n",
+        "-- (mesmas horas para os dois). Teste: últimos 12 meses fora do treino, no limiar do champion.\n",
+        "-- INMET: champion contra chuva medida nas cidades das estações (validação semanal).\n",
+        "WITH base AS (\n",
+        "  SELECT pred_vai_chover, api_vai_chover, choveu FROM weather_pipeline.gold.rain_model_accuracy_hourly\n",
+        "  WHERE api_precip_alvo IS NOT NULL\n",
+        "),\n",
+        "conf AS (\n",
+        "  SELECT 'modelo' AS src, pred_vai_chover AS p, choveu AS c FROM base\n",
+        "  UNION ALL\n",
+        "  SELECT 'api', api_vai_chover, choveu FROM base\n",
+        "),\n",
+        "agg AS (\n",
+        "  SELECT src, COUNT(*) AS n,\n",
+        "    SUM(CASE WHEN p = 1 AND c = 1 THEN 1 ELSE 0 END) AS vp,\n",
+        "    SUM(CASE WHEN p = 0 AND c = 0 THEN 1 ELSE 0 END) AS vn,\n",
+        "    SUM(CASE WHEN p = 1 AND c = 0 THEN 1 ELSE 0 END) AS fp,\n",
+        "    SUM(CASE WHEN p = 0 AND c = 1 THEN 1 ELSE 0 END) AS fn\n",
+        "  FROM conf GROUP BY src\n",
+        "),\n",
+        "met AS (\n",
+        "  SELECT s.src,\n",
+        "    COALESCE(a.n, 0) AS n, COALESCE(a.vp, 0) AS vp, COALESCE(a.vn, 0) AS vn,\n",
+        "    COALESCE(a.fp, 0) AS fp, COALESCE(a.fn, 0) AS fn,\n",
+        "    (a.vp + a.vn) / NULLIF(a.n, 0)          AS acc,\n",
+        "    a.vp / NULLIF(a.vp + a.fp, 0)           AS prec,\n",
+        "    a.vp / NULLIF(a.vp + a.fn, 0)           AS rec,\n",
+        "    2 * a.vp / NULLIF(2 * a.vp + a.fp + a.fn, 0) AS f1\n",
+        "  FROM (VALUES ('modelo'), ('api')) AS s(src)\n",
+        "  LEFT JOIN agg a ON a.src = s.src\n",
+        "),\n",
+        "inmet AS (\n",
+        "  -- última validação semanal do champion contra a chuva MEDIDA (INMET),\n",
+        "  -- média das cidades das estações, últimos 12 meses com dado\n",
+        "  SELECT avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN f1 END)            AS i_f1,\n",
+        "         avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN `precision` END)   AS i_prec,\n",
+        "         avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN recall END)        AS i_rec,\n",
+        "         avg(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN accuracy END)      AS i_acc,\n",
+        "         sum(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN test_size END)     AS i_n,\n",
+        "         count(CASE WHEN variante LIKE '%_chuva_medida_inmet' THEN 1 END)          AS i_cidades,\n",
+        "         avg(CASE WHEN variante LIKE '%_persistencia_inmet%' THEN f1 END)           AS p_f1\n",
+        "  FROM weather_pipeline.gold.ml_experiments\n",
+        "  WHERE experimento = 'inmet_validacao'\n",
+        "    AND created_at = (SELECT max(created_at) FROM weather_pipeline.gold.ml_experiments\n",
+        "                      WHERE experimento = 'inmet_validacao')\n",
+        "),\n",
+        "reg AS (\n",
+        "  -- champion regional (rótulo = chuva medida): avaliação deixando cada estação de fora\n",
+        "  SELECT version AS r_ver, threshold AS r_thr, f1 AS r_f1, `precision` AS r_prec, recall AS r_rec,\n",
+        "         accuracy AS r_acc, test_size AS r_n\n",
+        "  FROM weather_pipeline.gold.rain_regional_versions\n",
+        "  WHERE promoted ORDER BY version DESC LIMIT 1\n",
+        "),\n",
+        "champ AS (\n",
+        "  SELECT * FROM weather_pipeline.gold.rain_model_versions\n",
+        "  WHERE promoted ORDER BY version DESC LIMIT 1\n",
+        "),\n",
+        "f AS (\n",
+        "  SELECT\n",
+        "    m.n, m.vp AS m_vp, m.vn AS m_vn, m.fp AS m_fp, m.fn AS m_fn,\n",
+        "    m.acc AS m_acc, m.prec AS m_prec, m.rec AS m_rec, m.f1 AS m_f1,\n",
+        "    a.vp AS a_vp, a.vn AS a_vn, a.fp AS a_fp, a.fn AS a_fn,\n",
+        "    a.acc AS a_acc, a.prec AS a_prec, a.rec AS a_rec, a.f1 AS a_f1,\n",
+        "    c.version AS ver, c.threshold AS v_thr, c.test_size AS v_n,\n",
+        "    c.accuracy AS v_acc, c.precision AS v_prec, c.recall AS v_rec, c.f1 AS v_f1\n",
+        "  , i.*, r.*\n",
+        "  FROM met m\n",
+        "  JOIN met a ON m.src = 'modelo' AND a.src = 'api'\n",
+        "  CROSS JOIN champ c\n",
+        "  CROSS JOIN inmet i\n",
+        "  CROSS JOIN reg r\n",
+        ")\n",
+        "SELECT 1 AS ord, 'Observações (horas)' AS `Métrica`,\n",
+        "       CAST(n AS STRING) AS `Modelo (produção)`,\n",
+        "       CAST(n AS STRING) AS `API Open-Meteo (produção)`,\n",
+        "       CAST(v_n AS STRING) AS `Modelo (teste 12 meses)`,\n",
+        "       CONCAT(i_n, ' (', i_cidades, ' cidades)') AS `Modelo vs chuva medida (INMET)`,\n",
+        "       CONCAT(r_n, ' (estação fora do treino)') AS `Regional vs chuva medida (INMET)` FROM f\n",
+        "UNION ALL SELECT 2, 'Acurácia', CASE WHEN m_acc IS NULL THEN '—' ELSE CONCAT(ROUND(m_acc * 100, 1), '%') END, CASE WHEN a_acc IS NULL THEN '—' ELSE CONCAT(ROUND(a_acc * 100, 1), '%') END, CASE WHEN v_acc IS NULL THEN '—' ELSE CONCAT(ROUND(v_acc * 100, 1), '%') END, CASE WHEN i_acc IS NULL THEN '—' ELSE CONCAT(ROUND(i_acc * 100, 1), '%') END, CASE WHEN r_acc IS NULL THEN '—' ELSE CONCAT(ROUND(r_acc * 100, 1), '%') END FROM f\n",
+        "UNION ALL SELECT 3, 'Precisão', CASE WHEN m_prec IS NULL THEN '—' ELSE CONCAT(ROUND(m_prec * 100, 1), '%') END, CASE WHEN a_prec IS NULL THEN '—' ELSE CONCAT(ROUND(a_prec * 100, 1), '%') END, CASE WHEN v_prec IS NULL THEN '—' ELSE CONCAT(ROUND(v_prec * 100, 1), '%') END, CASE WHEN i_prec IS NULL THEN '—' ELSE CONCAT(ROUND(i_prec * 100, 1), '%') END, CASE WHEN r_prec IS NULL THEN '—' ELSE CONCAT(ROUND(r_prec * 100, 1), '%') END FROM f\n",
+        "UNION ALL SELECT 4, 'Recall',   CASE WHEN m_rec IS NULL THEN '—' ELSE CONCAT(ROUND(m_rec * 100, 1), '%') END,  CASE WHEN a_rec IS NULL THEN '—' ELSE CONCAT(ROUND(a_rec * 100, 1), '%') END,  CASE WHEN v_rec IS NULL THEN '—' ELSE CONCAT(ROUND(v_rec * 100, 1), '%') END , CASE WHEN i_rec IS NULL THEN '—' ELSE CONCAT(ROUND(i_rec * 100, 1), '%') END, CASE WHEN r_rec IS NULL THEN '—' ELSE CONCAT(ROUND(r_rec * 100, 1), '%') END FROM f\n",
+        "UNION ALL SELECT 5, 'F1',       CASE WHEN m_f1 IS NULL THEN '—' ELSE CAST(ROUND(m_f1, 3) AS STRING) END,   CASE WHEN a_f1 IS NULL THEN '—' ELSE CAST(ROUND(a_f1, 3) AS STRING) END,   CASE WHEN v_f1 IS NULL THEN '—' ELSE CAST(ROUND(v_f1, 3) AS STRING) END  , CASE WHEN i_f1 IS NULL THEN '—' ELSE CAST(ROUND(i_f1, 3) AS STRING) END, CASE WHEN r_f1 IS NULL THEN '—' ELSE CAST(ROUND(r_f1, 3) AS STRING) END FROM f\n",
+        "UNION ALL SELECT 6, 'VP / VN / FP / FN',\n",
+        "       CONCAT(m_vp, ' / ', m_vn, ' / ', m_fp, ' / ', m_fn),\n",
+        "       CONCAT(a_vp, ' / ', a_vn, ' / ', a_fp, ' / ', a_fn), '—', '—', '—' FROM f\n",
+        "UNION ALL SELECT 7, 'Diagnóstico',\n",
+        "       CASE\n",
+        "         WHEN n < 48 THEN CONCAT('⏳ Amostra pequena (', n, ' h)')\n",
+        "         WHEN m_f1 >= v_f1 - 0.05 THEN '✅ Como na validação'\n",
+        "         WHEN m_f1 >= v_f1 - 0.15 THEN '⚠️ Abaixo da validação — monitorar'\n",
+        "         ELSE '🔴 Retreinamento recomendado'\n",
+        "       END,\n",
+        "       CASE\n",
+        "         WHEN n < 48 THEN '⏳ Aguardando amostra'\n",
+        "         WHEN COALESCE(m_f1, 0) > COALESCE(a_f1, 0) + 0.02 THEN '✅ Modelo supera a API'\n",
+        "         WHEN COALESCE(m_f1, 0) < COALESCE(a_f1, 0) - 0.02 THEN '⚠️ API supera o modelo'\n",
+        "         ELSE '≈ Empate com a API'\n",
+        "       END,\n",
+        "       CONCAT('v', ver, ' · limiar ', REPLACE(CAST(v_thr AS STRING), '.', ',')),\n",
+        "       CASE\n",
+        "         WHEN i_f1 IS NULL THEN '—'\n",
+        "         WHEN i_f1 >= p_f1 THEN CONCAT('✅ Supera a persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')\n",
+        "         ELSE CONCAT('⚠️ Abaixo da persistência do pluviômetro (F1 ', ROUND(p_f1, 2), ')')\n",
+        "       END,\n",
+        "       CASE\n",
+        "         WHEN r_f1 IS NULL THEN '—'\n",
+        "         WHEN i_f1 IS NULL THEN CONCAT('v', r_ver, ' · limiar ', REPLACE(CAST(r_thr AS STRING), '.', ','))\n",
+        "         ELSE CONCAT(CASE WHEN r_f1 >= i_f1 THEN '✅ +' ELSE '⚠️ ' END,\n",
+        "                     ROUND(r_f1 - i_f1, 2), ' de F1 vs champion · v', r_ver,\n",
+        "                     ' · limiar ', REPLACE(CAST(r_thr AS STRING), '.', ','))\n",
+        "       END FROM f\n",
+        "ORDER BY ord"
+      ]
+    },
+    {
+      "name": "46c331e3",
+      "displayName": "Temperatura por Mês (média 1991–2020)",
+      "queryLines": [
+        "SELECT\n",
+        "  month,\n",
+        "  CASE month\n",
+        "    WHEN 1  THEN 'Jan' \n",
+        "    WHEN 2  THEN 'Fev' \n",
+        "    WHEN 3  THEN 'Mar'\n",
+        "    WHEN 4  THEN 'Abr' \n",
+        "    WHEN 5  THEN 'Mai' \n",
+        "    WHEN 6  THEN 'Jun'\n",
+        "    WHEN 7  THEN 'Jul' \n",
+        "    WHEN 8  THEN 'Ago'\n",
+        "    WHEN 9  THEN 'Set'\n",
+        "    WHEN 10 THEN 'Out' \n",
+        "    WHEN 11 THEN 'Nov' \n",
+        "    WHEN 12 THEN 'Dez'\n",
+        "  END                  AS mes_nome,\n",
+        "  ROUND(AVG(temp_max), 1)  AS temp_max_media,\n",
+        "  ROUND(AVG(temp_avg), 1)  AS temp_media,\n",
+        "  ROUND(AVG(temp_min), 1)  AS temp_min_media\n",
+        "FROM weather_pipeline.silver.weather_daily\n",
+        "WHERE year BETWEEN 1991 AND 2020   -- mesma referência das demais comparações\n",
+        "GROUP BY month\n",
+        "ORDER BY month"
+      ]
+    },
+    {
+      "name": "6a3845f3",
+      "displayName": "Precipitação por Mês (média 1991–2020)",
+      "queryLines": [
+        "SELECT\n",
+        "  month,\n",
+        "  element_at(array('Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'), month) AS mes_nome,\n",
+        "  ROUND(AVG(precip_total), 1)                              AS precip_media_diaria,\n",
+        "  ROUND(SUM(precip_total) / COUNT(DISTINCT year), 1)       AS precip_media_mensal_acum,\n",
+        "  ROUND(AVG(CAST(precip_total >= 1 AS INT)) * 100, 1)      AS pct_dias_com_chuva\n",
+        "FROM weather_pipeline.silver.weather_daily\n",
+        "WHERE year BETWEEN 1991 AND 2020   -- mesma referência das demais comparações\n",
+        "GROUP BY month\n",
+        "ORDER BY month\n"
+      ]
+    },
+    {
+      "name": "c905273f",
+      "displayName": "Tendência Anual de Temperatura (anos completos)",
+      "queryLines": [
+        "SELECT\n",
+        "  year,\n",
+        "  ROUND(AVG(temp_max), 1) AS temp_max_anual,\n",
+        "  ROUND(AVG(temp_avg), 1) AS temp_media_anual,\n",
+        "  ROUND(AVG(temp_min), 1) AS temp_min_anual\n",
+        "FROM weather_pipeline.silver.weather_daily\n",
+        "WHERE year >= 1940\n",
+        "  AND year < YEAR(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))   -- só anos completos (o ano corrente puxaria a média para baixo)\n",
+        "GROUP BY year\n",
+        "ORDER BY year"
+      ]
+    },
+    {
+      "name": "st01",
+      "displayName": "Status do pipeline",
+      "queryLines": [
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(MAX(inferencia_local))) / 60 <= 120   -- pipeline roda a cada hora: 🔴 com 2 h sem atualização\n",
+        "      THEN CONCAT('🟢 Atualizado às ', DATE_FORMAT(MAX(inferencia_local), 'HH:mm'))\n",
+        "    ELSE CONCAT('🔴 Atrasado · desde ', DATE_FORMAT(MAX(inferencia_local), 'dd/MM HH:mm'))\n",
+        "  END AS `Status`\n",
+        "FROM weather_pipeline.gold.rain_forecast_ml"
+      ]
+    },
+    {
+      "name": "ac01",
+      "displayName": "Chuva acumulada vs média 1991–2020",
+      "queryLines": [
+        "-- Chuva observada vs média 1991–2020 do mesmo período do calendário\n",
+        "WITH hoje AS (SELECT DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) AS d),\n",
+        "dias7 AS (SELECT explode(sequence(date_sub(d, 6), d)) AS dd FROM hoje),\n",
+        "mtd AS (\n",
+        "  SELECT COALESCE(SUM(o.precip_total), 0) AS v\n",
+        "  FROM weather_pipeline.silver.weather_daily o, hoje\n",
+        "  WHERE o.date BETWEEN trunc(hoje.d, 'MM') AND hoje.d),\n",
+        "mtd_n AS (\n",
+        "  SELECT SUM(o.precip_total) / 30 AS v\n",
+        "  FROM weather_pipeline.silver.weather_daily o, hoje\n",
+        "  WHERE o.year BETWEEN 1991 AND 2020 AND o.month = MONTH(hoje.d) AND o.day <= DAY(hoje.d)),\n",
+        "w7 AS (\n",
+        "  SELECT COALESCE(SUM(o.precip_total), 0) AS v\n",
+        "  FROM weather_pipeline.silver.weather_daily o JOIN dias7 ON o.date = dias7.dd),\n",
+        "w7_n AS (\n",
+        "  SELECT SUM(o.precip_total) / 30 AS v\n",
+        "  FROM weather_pipeline.silver.weather_daily o\n",
+        "  JOIN dias7 ON o.month = MONTH(dias7.dd) AND o.day = DAY(dias7.dd)\n",
+        "  WHERE o.year BETWEEN 1991 AND 2020)\n",
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN mtd_n.v < 0.5 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · média: ', REPLACE(CASE WHEN mtd_n.v = 0 THEN '0' WHEN mtd_n.v < 10 THEN CAST(ROUND(mtd_n.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd_n.v) AS INT) AS STRING) END, '.', ','), ' mm')\n",
+        "    WHEN ABS((mtd.v / mtd_n.v - 1) * 100) < 5 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · na média')\n",
+        "    WHEN (mtd.v / mtd_n.v - 1) * 100 > 0 THEN CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND((mtd.v / mtd_n.v - 1) * 100) AS INT), '% acima da média')\n",
+        "    ELSE CONCAT(REPLACE(CASE WHEN mtd.v = 0 THEN '0' WHEN mtd.v < 10 THEN CAST(ROUND(mtd.v, 1) AS STRING) ELSE CAST(CAST(ROUND(mtd.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND(-(mtd.v / mtd_n.v - 1) * 100) AS INT), '% abaixo da média')\n",
+        "  END AS `Chuva no mês`,\n",
+        "  CASE\n",
+        "    WHEN w7_n.v < 0.5 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · média: ', REPLACE(CASE WHEN w7_n.v = 0 THEN '0' WHEN w7_n.v < 10 THEN CAST(ROUND(w7_n.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7_n.v) AS INT) AS STRING) END, '.', ','), ' mm')\n",
+        "    WHEN ABS((w7.v / w7_n.v - 1) * 100) < 5 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · na média')\n",
+        "    WHEN (w7.v / w7_n.v - 1) * 100 > 0 THEN CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND((w7.v / w7_n.v - 1) * 100) AS INT), '% acima da média')\n",
+        "    ELSE CONCAT(REPLACE(CASE WHEN w7.v = 0 THEN '0' WHEN w7.v < 10 THEN CAST(ROUND(w7.v, 1) AS STRING) ELSE CAST(CAST(ROUND(w7.v) AS INT) AS STRING) END, '.', ','), ' mm · ', CAST(ROUND(-(w7.v / w7_n.v - 1) * 100) AS INT), '% abaixo da média')\n",
+        "  END AS `Chuva 7 dias`\n",
+        "FROM mtd, mtd_n, w7, w7_n"
+      ]
+    },
+    {
+      "name": "tn01",
+      "displayName": "Temperatura de hoje vs média 1991–2020 (±7 dias)",
+      "queryLines": [
+        "SELECT\n",
+        "  hour                                          AS hora,\n",
+        "  ROUND(CAST(temperature_2m AS DOUBLE), 1)      AS temperatura,\n",
+        "  ROUND(temp_climatologica, 1)                  AS normal\n",
+        "FROM weather_pipeline.gold.weather_today\n",
+        "WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))\n",
+        "ORDER BY hour"
+      ]
+    },
+    {
+      "name": "en01",
+      "displayName": "ENSO atual e tendência (NOAA CPC)",
+      "queryLines": [
+        "-- ENSO atual (último trimestre publicado pela NOAA CPC) e tendência\n",
+        "WITH u AS (\n",
+        "  SELECT season, year, oni, fase, intensidade, center_month,\n",
+        "         oni - LAG(oni) OVER (ORDER BY center_month) AS variacao\n",
+        "  FROM weather_pipeline.silver.enso_oni\n",
+        ")\n",
+        "SELECT\n",
+        "  CONCAT(\n",
+        "    CASE fase WHEN 'El Niño' THEN '🔴 ' WHEN 'La Niña' THEN '🔵 ' ELSE '⚪ ' END,\n",
+        "    fase,\n",
+        "    CASE WHEN intensidade IS NOT NULL THEN CONCAT(' ', intensidade) ELSE '' END,\n",
+        "    ' (', CASE WHEN oni >= 0 THEN '+' ELSE '' END,\n",
+        "    REPLACE(CAST(ROUND(oni, 1) AS STRING), '.', ','), ')')        AS `ENSO`,\n",
+        "  CONCAT(\n",
+        "    CASE WHEN variacao >  0.1 THEN '📈 Aquecendo'\n",
+        "         WHEN variacao < -0.1 THEN '📉 Esfriando'\n",
+        "         ELSE '➡️ Estável' END,\n",
+        "    ' · ', season, '/', year)                                    AS `Tendência`\n",
+        "FROM u\n",
+        "ORDER BY center_month DESC\n",
+        "LIMIT 1"
+      ]
+    },
+    {
+      "name": "en02",
+      "displayName": "ONI — últimos 15 anos",
+      "queryLines": [
+        "-- ONI dos últimos 15 anos; limiares de El Niño (+0,5) e La Niña (−0,5)\n",
+        "SELECT\n",
+        "  CAST(center_month AS DATE) AS ano,\n",
+        "  oni,\n",
+        "  0.5                        AS limiar_el_nino,\n",
+        "  -0.5                       AS limiar_la_nina\n",
+        "FROM weather_pipeline.silver.enso_oni\n",
+        "WHERE center_month >= add_months(current_date(), -12 * 15)\n",
+        "ORDER BY center_month\n"
+      ]
+    },
+    {
+      "name": "ld01",
+      "displayName": "Acurácia por antecedência (produção)",
+      "queryLines": [
+        "-- Acurácia por antecedência (produção, champion atual): todas as previsões do\n",
+        "-- histórico × chuva observada; ⏳ enquanto a faixa tiver menos de 48 horas avaliadas\n",
+        "WITH atual AS (\n",
+        "  SELECT max_by(modelo, inferencia_local) AS modelo FROM weather_pipeline.gold.rain_forecast_ml_history\n",
+        "),\n",
+        "b AS (\n",
+        "  SELECT l.* FROM weather_pipeline.gold.rain_model_accuracy_by_lead l JOIN atual a ON l.modelo = a.modelo\n",
+        "),\n",
+        "faixas AS (SELECT explode(array('01–06 h', '07–12 h', '13–18 h', '19–24 h')) AS faixa_antecedencia),\n",
+        "agg AS (\n",
+        "  SELECT faixa_antecedencia, count(*) AS n,\n",
+        "    sum(CASE WHEN pred_vai_chover = 1 AND choveu = 1 THEN 1 ELSE 0 END) AS vp,\n",
+        "    sum(CASE WHEN pred_vai_chover = 1 AND choveu = 0 THEN 1 ELSE 0 END) AS fp,\n",
+        "    sum(CASE WHEN pred_vai_chover = 0 AND choveu = 1 THEN 1 ELSE 0 END) AS fn,\n",
+        "    sum(CASE WHEN api_vai_chover = 1 AND choveu = 1 THEN 1 ELSE 0 END)  AS avp,\n",
+        "    sum(CASE WHEN api_vai_chover = 1 AND choveu = 0 THEN 1 ELSE 0 END)  AS afp,\n",
+        "    sum(CASE WHEN api_vai_chover = 0 AND choveu = 1 THEN 1 ELSE 0 END)  AS afn\n",
+        "  FROM b GROUP BY faixa_antecedencia\n",
+        ")\n",
+        "SELECT\n",
+        "  f.faixa_antecedencia                                              AS `Antecedência`,\n",
+        "  COALESCE(n, 0)                                                    AS `Horas avaliadas`,\n",
+        "  CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'\n",
+        "       ELSE COALESCE(CAST(ROUND(2 * vp / NULLIF(2 * vp + fp + fn, 0), 3) AS STRING), '—') END   AS `F1 modelo`,\n",
+        "  CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'\n",
+        "       ELSE COALESCE(CAST(ROUND(2 * avp / NULLIF(2 * avp + afp + afn, 0), 3) AS STRING), '—') END AS `F1 API Open-Meteo`,\n",
+        "  CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'\n",
+        "       ELSE COALESCE(CONCAT(ROUND(vp * 100 / NULLIF(vp + fp, 0), 1), '%'), '—') END             AS `Precisão modelo`,\n",
+        "  CASE WHEN COALESCE(n, 0) < 48 THEN '⏳'\n",
+        "       ELSE COALESCE(CONCAT(ROUND(vp * 100 / NULLIF(vp + fn, 0), 1), '%'), '—') END             AS `Recall modelo`,\n",
+        "  (SELECT modelo FROM atual)                                        AS `Modelo`,\n",
+        "  (SELECT date_format(min(target_time), 'dd/MM') FROM b)            AS `Avaliado desde`\n",
+        "FROM faixas f\n",
+        "LEFT JOIN agg a ON a.faixa_antecedencia = f.faixa_antecedencia\n",
+        "ORDER BY f.faixa_antecedencia\n"
+      ]
+    },
+    {
+      "name": "rg01",
+      "displayName": "Chance de chuva medida — próxima hora (modelo regional INMET)",
+      "queryLines": [
+        "SELECT CASE\n",
+        "  WHEN prob_chuva_medida IS NULL THEN '⚪ indisponível'\n",
+        "  ELSE CONCAT(\n",
+        "    CASE WHEN prob_chuva_medida >= threshold_regional THEN '🌧️ Sim · ' ELSE '☀️ Não · ' END,\n",
+        "    CAST(ROUND(prob_chuva_medida * 100) AS INT), '% às ', LPAD(CAST(HOUR(target_time) AS STRING), 2, '0'),\n",
+        "    'h (limiar ', CAST(ROUND(threshold_regional * 100) AS INT), '%)') END AS `Chuva medida`\n",
+        "FROM weather_pipeline.gold.rain_forecast_ml\n",
+        "WHERE target_time = (\n",
+        "  SELECT MIN(target_time) FROM weather_pipeline.gold.rain_forecast_ml\n",
+        "  WHERE target_time > from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')\n",
+        ")\n"
+      ]
+    },
+    {
+      "name": "mm01",
+      "displayName": "Temperatura máxima / mínima do dia",
+      "queryLines": [
+        "SELECT CONCAT(\n",
+        "  REPLACE(CAST(ROUND(MAX(CAST(temperature_2m AS DOUBLE)), 1) AS STRING), '.', ','), '° / ',\n",
+        "  REPLACE(CAST(ROUND(MIN(CAST(temperature_2m AS DOUBLE)), 1) AS STRING), '.', ','), '°') AS `Máx / Mín`\n",
+        "FROM weather_pipeline.gold.weather_today\n",
+        "WHERE DATE(observation_time) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))"
+      ]
+    },
+    {
+      "name": "av01",
+      "displayName": "Aviso oficial ativo (INMET / Defesa Civil)",
+      "queryLines": [
+        "-- Aviso oficial mais severo ativo para a cidade (INMET — repassado pela Defesa Civil)\n",
+        "WITH a AS (SELECT * FROM weather_pipeline.gold.avisos_cidade),\n",
+        "ativos AS (SELECT * FROM a WHERE situacao = 'ativo'),\n",
+        "topo AS (SELECT * FROM ativos ORDER BY nivel DESC, fim DESC LIMIT 1),\n",
+        "prox AS (SELECT * FROM a WHERE situacao = 'futuro' ORDER BY inicio, nivel DESC LIMIT 1)\n",
+        "SELECT CASE\n",
+        "  WHEN (SELECT count(*) FROM ativos) > 0 THEN (\n",
+        "    SELECT CONCAT(CASE nivel WHEN 3 THEN '🔴 ' WHEN 2 THEN '🟠 ' ELSE '🟡 ' END,\n",
+        "                  descricao, ' — ', severidade, ' · até ',\n",
+        "                  DATE_FORMAT(fim, CASE WHEN DATE(fim) = DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) THEN 'HH:mm' ELSE 'dd/MM HH:mm' END),\n",
+        "                  CASE WHEN (SELECT count(*) FROM ativos) > 1\n",
+        "                       THEN CONCAT(' (+', (SELECT count(*) FROM ativos) - 1, ')') ELSE '' END)\n",
+        "    FROM topo)\n",
+        "  WHEN (SELECT count(*) FROM prox) > 0 THEN (\n",
+        "    SELECT CONCAT('🟢 Nenhum ativo · próximo: ', descricao, ' (', severidade, ') em ', DATE_FORMAT(inicio, 'dd/MM'))\n",
+        "    FROM prox)\n",
+        "  ELSE '🟢 Nenhum aviso ativo'\n",
+        "END AS `Avisos`"
+      ]
+    },
+    {
+      "name": "av02",
+      "displayName": "Avisos oficiais — ativos e próximos (INMET / Defesa Civil)",
+      "queryLines": [
+        "-- Avisos da cidade (ativos, próximos e encerrados nos últimos 7 dias) × chuva observada × modelos\n",
+        "SELECT\n",
+        "  CASE a.situacao WHEN 'ativo' THEN '⚠️ Ativo' WHEN 'futuro' THEN '🔜 Próximo' ELSE '✔️ Encerrado' END AS `Situação`,\n",
+        "  CONCAT(CASE a.nivel WHEN 3 THEN '🔴 ' WHEN 2 THEN '🟠 ' ELSE '🟡 ' END, a.descricao)          AS `Aviso`,\n",
+        "  a.severidade                                                                                AS `Severidade`,\n",
+        "  DATE_FORMAT(a.inicio, 'dd/MM HH:mm')                                                        AS `Início`,\n",
+        "  DATE_FORMAT(a.fim, 'dd/MM HH:mm')                                                           AS `Fim`,\n",
+        "  COALESCE(CONCAT(REPLACE(CAST(m.chuva_obs_mm AS STRING), '.', ','), ' mm em ', m.horas_observadas, ' h'), '—') AS `Chuva observada`,\n",
+        "  CASE WHEN m.horas_com_previsao > 0\n",
+        "       THEN CONCAT(m.horas_alerta_champion, ' de ', m.horas_com_previsao, ' h') ELSE '—' END   AS `Champion: horas com alerta`,\n",
+        "  CASE WHEN m.horas_com_previsao > 0 AND m.horas_alerta_regional IS NOT NULL\n",
+        "       THEN CONCAT(m.horas_alerta_regional, ' de ', m.horas_com_previsao, ' h') ELSE '—' END   AS `Regional: horas com alerta`,\n",
+        "  a.riscos                                                                                    AS `Riscos`\n",
+        "FROM weather_pipeline.gold.avisos_cidade a\n",
+        "LEFT JOIN weather_pipeline.gold.avisos_vs_modelo m ON m.id = a.id\n",
+        "WHERE a.situacao IN ('ativo', 'futuro') OR a.fim >= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo') - INTERVAL 7 DAYS\n",
+        "ORDER BY CASE a.situacao WHEN 'ativo' THEN 0 WHEN 'futuro' THEN 1 ELSE 2 END, a.inicio, a.nivel DESC"
+      ]
+    },
+    {
+      "name": "es01",
+      "displayName": "Estação chuvosa atual vs normal",
+      "queryLines": [
+        "-- Estação atual (desde 1/jul) vs normal 1991–2020 (view gold.estacao_vs_analogos, atualizada a cada hora)\n",
+        "-- e início da estação chuvosa (gold.estacao_chuvosa, método de Liebmann; recalculado no job semanal)\n",
+        "WITH v AS (\n",
+        "  SELECT * FROM weather_pipeline.gold.estacao_vs_analogos\n",
+        "  WHERE data = (SELECT MAX(data) FROM weather_pipeline.gold.estacao_vs_analogos WHERE tipo = 'atual')\n",
+        "),\n",
+        "p AS (\n",
+        "  SELECT\n",
+        "    MAX(CASE WHEN tipo = 'atual'      THEN ano_estacao   END) AS ano,\n",
+        "    MAX(CASE WHEN tipo = 'atual'      THEN chuva_acum_mm END) AS chuva,\n",
+        "    MAX(CASE WHEN tipo = 'normal_p10' THEN chuva_acum_mm END) AS p10,\n",
+        "    MAX(CASE WHEN tipo = 'normal_p50' THEN chuva_acum_mm END) AS p50,\n",
+        "    MAX(CASE WHEN tipo = 'normal_p90' THEN chuva_acum_mm END) AS p90,\n",
+        "    MAX(CASE WHEN tipo = 'atual'      THEN dias_35_acum  END) AS d35,\n",
+        "    MAX(CASE WHEN tipo = 'normal_p50' THEN dias_35_acum  END) AS d35_n\n",
+        "  FROM v\n",
+        "),\n",
+        "ini AS (\n",
+        "  SELECT\n",
+        "    MAX(CASE WHEN e.provisorio AND e.ano_estacao = p.ano THEN e.inicio END)                        AS inicio,\n",
+        "    PERCENTILE(CASE WHEN e.completa AND e.ano_estacao BETWEEN 1990 AND 2019 THEN e.inicio_dia END, 0.5) AS normal_dia\n",
+        "  FROM weather_pipeline.gold.estacao_chuvosa e, p\n",
+        "  WHERE e.fonte = 'ERA5'\n",
+        ")\n",
+        "SELECT\n",
+        "  CONCAT(CAST(ROUND(chuva) AS INT), ' mm · ',\n",
+        "    CASE WHEN chuva > p90 THEN '🟦 entre as 10% mais chuvosas'\n",
+        "         WHEN chuva < p10 THEN '🟧 entre as 10% mais secas'\n",
+        "         ELSE 'dentro do normal' END,\n",
+        "    ' (mediana: ', CAST(ROUND(p50) AS INT), ' mm)')                                  AS `Chuva na estação`,\n",
+        "  CONCAT(COALESCE(CONCAT(date_format(inicio, 'dd/MM'), ' (provisório)'), 'ainda não começou'),\n",
+        "    ' · normal: ', date_format(date_add(make_date(ano, 7, 1), CAST(normal_dia AS INT)), 'dd/MM')) AS `Início da estação chuvosa`,\n",
+        "  CONCAT(CAST(d35 AS INT), ' dias · normal até hoje: ', CAST(ROUND(d35_n) AS INT))  AS `Dias com máxima ≥ 35 °C`\n",
+        "FROM p, ini"
+      ]
+    },
+    {
+      "name": "es02",
+      "displayName": "Chuva acumulada na estação — atual, normal e análogos do ENSO",
+      "queryLines": [
+        "-- Chuva acumulada desde 1/jul: estação atual × normal 1991–2020 (10% mais secas, mediana,\n",
+        "-- 10% mais chuvosas) × mediana dos 5 anos com ONI mais parecido (view gold.estacao_vs_analogos)\n",
+        "SELECT\n",
+        "  data,\n",
+        "  ROUND(MAX(CASE WHEN tipo = 'atual'      THEN chuva_acum_mm END), 1) AS atual,\n",
+        "  ROUND(MAX(CASE WHEN tipo = 'normal_p10' THEN chuva_acum_mm END), 1) AS normal_p10,\n",
+        "  ROUND(MAX(CASE WHEN tipo = 'normal_p50' THEN chuva_acum_mm END), 1) AS normal_p50,\n",
+        "  ROUND(MAX(CASE WHEN tipo = 'normal_p90' THEN chuva_acum_mm END), 1) AS normal_p90,\n",
+        "  ROUND(MAX(CASE WHEN tipo = 'analogos'   THEN chuva_acum_mm END), 1) AS analogos\n",
+        "FROM weather_pipeline.gold.estacao_vs_analogos\n",
+        "WHERE data <= date_add(DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')), 60)\n",
+        "GROUP BY data\n",
+        "ORDER BY data\n"
+      ]
+    },
+    {
+      "name": "es03",
+      "displayName": "Estação atual × análogos do ENSO × normal",
+      "queryLines": [
+        "-- Estação atual × anos com ONI parecido (análogos) × normal: chuva e calor até a mesma data,\n",
+        "-- início da estação chuvosa e totais do ano hidrológico (jul–jun)\n",
+        "WITH hoje AS (SELECT MAX(data) AS d FROM weather_pipeline.gold.estacao_vs_analogos WHERE tipo = 'atual'),\n",
+        "ate AS (\n",
+        "  SELECT v.tipo, v.ano_estacao, v.serie, v.oni, v.trimestre_oni, v.chuva_acum_mm, v.dias_35_acum\n",
+        "  FROM weather_pipeline.gold.estacao_vs_analogos v, hoje\n",
+        "  WHERE v.data = hoje.d AND v.tipo IN ('atual', 'analogo', 'normal_p50')\n",
+        "),\n",
+        "total AS (\n",
+        "  SELECT tipo, ano_estacao, MAX(chuva_acum_mm) AS chuva, MAX(dias_35_acum) AS d35\n",
+        "  FROM weather_pipeline.gold.estacao_vs_analogos\n",
+        "  WHERE tipo IN ('analogo', 'normal_p50')\n",
+        "  GROUP BY tipo, ano_estacao\n",
+        "),\n",
+        "est AS (SELECT * FROM weather_pipeline.gold.estacao_chuvosa WHERE fonte = 'ERA5'),\n",
+        "normal_ini AS (SELECT PERCENTILE(inicio_dia, 0.5) AS d FROM est WHERE completa AND ano_estacao BETWEEN 1990 AND 2019),\n",
+        "atual AS (SELECT MAX(ano_estacao) AS ano FROM ate WHERE tipo = 'atual')\n",
+        "SELECT\n",
+        "  a.serie                                                                  AS `Estação`,\n",
+        "  CASE WHEN a.oni IS NULL THEN '—'\n",
+        "       ELSE CONCAT(CASE WHEN a.oni >= 0 THEN '+' ELSE '' END,\n",
+        "                   REPLACE(FORMAT_NUMBER(a.oni, 1), '.', ','), ' (', a.trimestre_oni, ')') END AS `ONI`,\n",
+        "  CAST(ROUND(a.chuva_acum_mm) AS INT)                                      AS `Chuva até hoje (mm)`,\n",
+        "  CAST(ROUND(a.dias_35_acum) AS INT)                                       AS `Dias ≥ 35 °C até hoje`,\n",
+        "  CASE WHEN a.tipo = 'normal_p50'\n",
+        "         THEN date_format(date_add(make_date(atual.ano, 7, 1), CAST(normal_ini.d AS INT)), 'dd/MM')\n",
+        "       WHEN e.inicio IS NULL THEN '—'\n",
+        "       ELSE CONCAT(date_format(e.inicio, 'dd/MM'), CASE WHEN e.provisorio THEN ' (provisório)' ELSE '' END)\n",
+        "  END                                                                      AS `Início da estação chuvosa`,\n",
+        "  CAST(ROUND(t.chuva) AS INT)                                              AS `Chuva jul–jun (mm)`,\n",
+        "  CAST(ROUND(t.d35) AS INT)                                                AS `Dias ≥ 35 °C jul–jun`\n",
+        "FROM ate a\n",
+        "CROSS JOIN atual\n",
+        "CROSS JOIN normal_ini\n",
+        "LEFT JOIN est e   ON e.ano_estacao = a.ano_estacao\n",
+        "LEFT JOIN total t ON t.tipo = a.tipo AND t.ano_estacao <=> a.ano_estacao\n",
+        "ORDER BY CASE a.tipo WHEN 'atual' THEN 0 WHEN 'analogo' THEN 1 ELSE 2 END, a.ano_estacao"
+      ]
+    },
+    {
+      "name": "en04",
+      "displayName": "ENSO — previsibilidade",
+      "queryLines": [
+        "-- Dá para prever o trimestre pela fase do ENSO? (gold.enso_previsibilidade: o ONI já publicado\n",
+        "-- prevê o tercil — abaixo / normal / acima — melhor que a climatologia? Teste retroativo, cada ano de fora)\n",
+        "SELECT CONCAT(\n",
+        "  CASE WHEN SUM(CAST(tem_habilidade AS INT)) = 0 THEN '❌ Não: ' ELSE '✅ Em parte: ' END,\n",
+        "  SUM(CAST(tem_habilidade AS INT)), ' de ', COUNT(*), ' testes batem a climatologia (melhor RPSS ',\n",
+        "  REPLACE(FORMAT_NUMBER(MAX(rpss), 2), '.', ','), ')') AS `Previsibilidade`\n",
+        "FROM weather_pipeline.gold.enso_previsibilidade"
+      ]
+    },
+    {
+      "name": "en03",
+      "displayName": "ENSO — o que muda em Birigui",
+      "queryLines": [
+        "-- O que o El Niño e a La Niña mudam em Birigui (gold.enso_impacto): anomalia média do trimestre em que\n",
+        "-- a fase ocorre × demais anos, sem a tendência de longo prazo. Chuva em % da normal.\n",
+        "-- ✳️ = p < 0,05 isolado; com ~740 comparações, nenhum resultado passa na correção para múltiplos testes.\n",
+        "WITH i AS (\n",
+        "  SELECT ordem, trimestre, meses, fonte, grupo, metrica,\n",
+        "         CONCAT(\n",
+        "           CASE WHEN COALESCE(anomalia_pct, anomalia) >= 0 THEN '+' ELSE '' END,\n",
+        "           CASE WHEN metrica = 'tmax_c'  THEN CONCAT(REPLACE(FORMAT_NUMBER(anomalia, 1), '.', ','), ' °C')\n",
+        "                WHEN metrica = 'dias_35' THEN CONCAT(REPLACE(FORMAT_NUMBER(anomalia, 1), '.', ','), ' dias')\n",
+        "                ELSE CONCAT(CAST(CAST(ROUND(anomalia_pct) AS INT) AS STRING), '%') END,\n",
+        "           CASE WHEN p_valor < 0.05 THEN ' ✳️' ELSE '' END) AS txt\n",
+        "  FROM weather_pipeline.gold.enso_impacto\n",
+        "  WHERE trimestre <> 'estação chuvosa'\n",
+        ")\n",
+        "SELECT\n",
+        "  CONCAT(trimestre, ' (', meses, ')')                                                                 AS `Trimestre`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · El Niño · modelo (1950+)`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'ANA'   THEN txt END), '—')         AS `Chuva · El Niño · pluviômetros (1950–2024)`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'El Niño' AND metrica = 'chuva_mm' AND fonte = 'INMET' THEN txt END), '—')         AS `Chuva · El Niño · INMET (2007+)`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'ERA5'  THEN txt END), '—')         AS `Chuva · La Niña · modelo`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'La Niña' AND metrica = 'chuva_mm' AND fonte = 'ANA'   THEN txt END), '—')         AS `Chuva · La Niña · pluviômetros`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'tmax_c'  AND fonte = 'ERA5' THEN txt END), '—') AS `Máxima · El Niño ≥ moderado`,\n",
+        "  COALESCE(MAX(CASE WHEN grupo = 'El Niño ≥ moderado' AND metrica = 'dias_35' AND fonte = 'ERA5' THEN txt END), '—') AS `Dias ≥ 35 °C · El Niño ≥ moderado`\n",
+        "FROM i\n",
+        "GROUP BY ordem, trimestre, meses\n",
+        "ORDER BY ordem"
+      ]
+    },
+    {
+      "name": "en05",
+      "displayName": "ENSO — a previsão erra mais com El Niño?",
+      "queryLines": [
+        "-- A previsão erra mais com El Niño? F1 de \"vai chover na hora\" (rótulo Open-Meteo), somando só os meses do\n",
+        "-- calendário que têm dados com e sem El Niño — assim não se compara estação seca com chuvosa\n",
+        "-- (view gold.acuracia_por_enso)\n",
+        "WITH a AS (\n",
+        "  SELECT fonte, antecedencia, mes_do_ano, fase = 'El Niño' AS el_nino,\n",
+        "         SUM(acertos) AS tp, SUM(falsos_alarmes) AS fp, SUM(perdidas) AS fn, SUM(horas) AS horas\n",
+        "  FROM weather_pipeline.gold.acuracia_por_enso\n",
+        "  GROUP BY fonte, antecedencia, mes_do_ano, fase = 'El Niño'\n",
+        "),\n",
+        "par AS (\n",
+        "  SELECT fonte, antecedencia, mes_do_ano FROM a\n",
+        "  GROUP BY fonte, antecedencia, mes_do_ano HAVING COUNT(DISTINCT el_nino) = 2\n",
+        "),\n",
+        "t AS (\n",
+        "  SELECT a.fonte, a.antecedencia,\n",
+        "         COUNT(DISTINCT a.mes_do_ano)                                                        AS meses,\n",
+        "         SUM(CASE WHEN a.el_nino THEN a.tp END)     * 2.0 /\n",
+        "           NULLIF(SUM(CASE WHEN a.el_nino THEN 2 * a.tp + a.fp + a.fn END), 0)                AS f1_en,\n",
+        "         SUM(CASE WHEN NOT a.el_nino THEN a.tp END) * 2.0 /\n",
+        "           NULLIF(SUM(CASE WHEN NOT a.el_nino THEN 2 * a.tp + a.fp + a.fn END), 0)            AS f1_outros,\n",
+        "         SUM(CASE WHEN a.el_nino THEN a.horas END)                                           AS h_en,\n",
+        "         SUM(CASE WHEN NOT a.el_nino THEN a.horas END)                                       AS h_outros\n",
+        "  FROM a JOIN par USING (fonte, antecedencia, mes_do_ano)\n",
+        "  GROUP BY a.fonte, a.antecedencia\n",
+        "),\n",
+        "fontes AS (SELECT DISTINCT fonte, antecedencia FROM weather_pipeline.gold.acuracia_por_enso)\n",
+        "SELECT\n",
+        "  f.fonte                                                                          AS `Previsão`,\n",
+        "  f.antecedencia                                                                   AS `Antecedência`,\n",
+        "  COALESCE(t.meses, 0)                                                             AS `Meses do ano comparáveis`,\n",
+        "  CASE WHEN t.f1_en IS NULL THEN '⏳ aguardando meses sem El Niño'\n",
+        "       ELSE CONCAT(REPLACE(FORMAT_NUMBER(t.f1_en, 2), '.', ','), ' (', REPLACE(FORMAT_NUMBER(t.h_en, 0), ',', '.'), ' h)') END    AS `F1 com El Niño`,\n",
+        "  CASE WHEN t.f1_outros IS NULL THEN '—'\n",
+        "       ELSE CONCAT(REPLACE(FORMAT_NUMBER(t.f1_outros, 2), '.', ','), ' (', REPLACE(FORMAT_NUMBER(t.h_outros, 0), ',', '.'), ' h)') END AS `F1 nos mesmos meses sem El Niño`,\n",
+        "  CASE WHEN t.f1_en IS NULL OR t.f1_outros IS NULL THEN '—'\n",
+        "       ELSE CONCAT(CASE WHEN t.f1_en >= t.f1_outros THEN '+' ELSE '' END,\n",
+        "                   REPLACE(FORMAT_NUMBER(t.f1_en - t.f1_outros, 2), '.', ',')) END AS `Diferença`\n",
+        "FROM fontes f\n",
+        "LEFT JOIN t USING (fonte, antecedencia)\n",
+        "ORDER BY f.fonte, f.antecedencia"
+      ]
+    },
+    {
+      "name": "en06",
+      "displayName": "ENSO — acerto da API por mês, com e sem El Niño",
+      "queryLines": [
+        "-- Mês a mês: F1 da API Open-Meteo (rodada de 1 dia antes) com El Niño × nos mesmos meses sem El Niño.\n",
+        "-- Meses secos têm poucas horas de chuva: um punhado de acertos muda o F1 — olhar a coluna de horas.\n",
+        "WITH a AS (\n",
+        "  SELECT mes_do_ano, fase = 'El Niño' AS el_nino,\n",
+        "         SUM(acertos) AS tp, SUM(falsos_alarmes) AS fp, SUM(perdidas) AS fn,\n",
+        "         CONCAT_WS(', ', ARRAY_SORT(COLLECT_SET(CAST(YEAR(mes) AS STRING))))                 AS anos\n",
+        "  FROM weather_pipeline.gold.acuracia_por_enso\n",
+        "  WHERE fonte = 'API Open-Meteo' AND antecedencia LIKE 'd1%'\n",
+        "  GROUP BY mes_do_ano, fase = 'El Niño'\n",
+        "),\n",
+        "f AS (\n",
+        "  SELECT *, CASE WHEN 2 * tp + fp + fn > 0 THEN REPLACE(FORMAT_NUMBER(2.0 * tp / (2 * tp + fp + fn), 2), '.', ',') END AS f1\n",
+        "  FROM a\n",
+        ")\n",
+        "SELECT\n",
+        "  ELEMENT_AT(ARRAY('Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'), mes_do_ano) AS `Mês`,\n",
+        "  COALESCE(MAX(CASE WHEN el_nino THEN anos END), '—')         AS `Anos com El Niño`,\n",
+        "  COALESCE(MAX(CASE WHEN el_nino THEN f1 END), '—')           AS `F1 com El Niño`,\n",
+        "  MAX(CASE WHEN el_nino THEN tp + fn END)                     AS `Horas de chuva (El Niño)`,\n",
+        "  COALESCE(MAX(CASE WHEN NOT el_nino THEN anos END), '—')     AS `Anos sem El Niño`,\n",
+        "  COALESCE(MAX(CASE WHEN NOT el_nino THEN f1 END), '—')       AS `F1 sem El Niño`,\n",
+        "  MAX(CASE WHEN NOT el_nino THEN tp + fn END)                 AS `Horas de chuva (sem El Niño)`\n",
+        "FROM f\n",
+        "GROUP BY mes_do_ano\n",
+        "ORDER BY mes_do_ano"
+      ]
+    },
+    {
+      "name": "ap01",
+      "displayName": "Chance de chuva — próximas horas (Open-Meteo)",
+      "queryLines": [
+        "-- Probabilidade de chuva da própria Open-Meteo (ensemble), hora a hora:\n",
+        "-- a próxima hora e o máximo nas próximas 6 h, com a chuva prevista no período\n",
+        "WITH f AS (\n",
+        "  SELECT observation_time, precipitation, precipitation_probability AS p\n",
+        "  FROM weather_pipeline.silver.weather_forecast\n",
+        "  WHERE observation_time >  from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')\n",
+        "    AND observation_time <= from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo') + INTERVAL 6 HOURS\n",
+        "    AND precipitation_probability IS NOT NULL\n",
+        "),\n",
+        "prox AS (SELECT * FROM f ORDER BY observation_time LIMIT 1),\n",
+        "seis AS (SELECT max(p) AS pmax, sum(precipitation) AS mm FROM f)\n",
+        "SELECT CONCAT(\n",
+        "  CASE WHEN seis.pmax >= 70 THEN '🔴 ' WHEN seis.pmax >= 40 THEN '🟠 '\n",
+        "       WHEN seis.pmax >= 20 THEN '🟡 ' ELSE '🟢 ' END,\n",
+        "  CAST(prox.p AS INT), '% às ', LPAD(CAST(HOUR(prox.observation_time) AS STRING), 2, '0'), 'h · até ',\n",
+        "  CAST(seis.pmax AS INT), '% em 6 h · ',\n",
+        "  REPLACE(CAST(ROUND(seis.mm, 1) AS STRING), '.', ','), ' mm') AS `Chance de chuva`\n",
+        "FROM prox CROSS JOIN seis\n"
+      ]
+    },
+    {
+      "name": "cel01",
+      "displayName": "Status do celular (coletor do INMET)",
+      "queryLines": [
+        "-- Sinal de vida gravado a cada hora pelo scripts/inmet_avisos_sync.py (celular, Termux)\n",
+        "WITH s AS (\n",
+        "  SELECT to_timestamp(enviado_em) AS t, resultado\n",
+        "  FROM read_files('/Volumes/weather_pipeline/bronze/coletores/celular.json', format => 'json')\n",
+        ")\n",
+        "SELECT CASE\n",
+        "  WHEN (unix_timestamp(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) - unix_timestamp(t)) / 60 > 150\n",
+        "    THEN CONCAT('🔴 Sem contato desde ', date_format(t, 'dd/MM HH:mm'))\n",
+        "  WHEN resultado LIKE 'erro%' THEN CONCAT('🟠 Erro às ', date_format(t, 'HH:mm'))\n",
+        "  ELSE CONCAT('🟢 Ok às ', date_format(t, 'HH:mm'))\n",
+        "END AS `Celular`\n",
+        "FROM s\n"
+      ]
+    },
+    {
+      "name": "p48h",
+      "displayName": "Próximas 48 h — chuva prevista e chance de chuva",
+      "queryLines": [
+        "-- Chuva prevista (mm) e chance de chuva: Open-Meteo, champion e regional (24 h)\n",
+        "WITH f AS (\n",
+        "  SELECT observation_time, precipitation, precipitation_probability\n",
+        "  FROM weather_pipeline.silver.weather_forecast\n",
+        "  WHERE observation_time >  date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo'))\n",
+        "    AND observation_time <= date_trunc('hour', from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) + INTERVAL 48 HOURS\n",
+        ")\n",
+        "SELECT\n",
+        "  f.observation_time                        AS hora,\n",
+        "  ROUND(CAST(f.precipitation AS DOUBLE), 1) AS chuva_mm,\n",
+        "  f.precipitation_probability               AS chance_api_pct,\n",
+        "  ROUND(m.prob_chuva * 100)                 AS champion_pct,\n",
+        "  ROUND(m.prob_chuva_medida * 100)          AS regional_pct\n",
+        "FROM f\n",
+        "LEFT JOIN weather_pipeline.gold.rain_forecast_ml m ON m.target_time = f.observation_time\n",
+        "ORDER BY hora\n"
+      ]
+    },
+    {
+      "name": "d7d",
+      "displayName": "Próximos 7 dias",
+      "queryLines": [
+        "-- Hoje (observado até agora + previsão) e os 6 dias seguintes, da silver\n",
+        "-- (uma linha por hora; horas futuras = previsão mais recente da Open-Meteo)\n",
+        "WITH hoje AS (SELECT DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')) AS d),\n",
+        "a AS (\n",
+        "  SELECT DATE(c.observation_time)                                  AS dia,\n",
+        "         max(c.temperature_2m)                                     AS tmax,\n",
+        "         min(c.temperature_2m)                                     AS tmin,\n",
+        "         sum(c.precipitation)                                      AS chuva,\n",
+        "         max(c.precipitation_probability)                          AS pmax,\n",
+        "         sum(CASE WHEN c.precipitation >= 0.5 THEN 1 ELSE 0 END)   AS horas_chuva,\n",
+        "         max(c.wind_gusts_10m)                                     AS rajada\n",
+        "  FROM weather_pipeline.silver.weather_clean c, hoje\n",
+        "  WHERE DATE(c.observation_time) BETWEEN hoje.d AND date_add(hoje.d, 6)\n",
+        "  GROUP BY 1\n",
+        ")\n",
+        "SELECT\n",
+        "  CONCAT(CASE WHEN dia = hoje.d THEN 'Hoje'\n",
+        "              WHEN dia = date_add(hoje.d, 1) THEN 'Amanhã'\n",
+        "              ELSE element_at(array('Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'), dayofweek(dia)) END,\n",
+        "         ' ', date_format(dia, 'dd/MM'))                                          AS `Dia`,\n",
+        "  REPLACE(CAST(ROUND(tmax, 1) AS STRING), '.', ',')                               AS `Máx (°C)`,\n",
+        "  REPLACE(CAST(ROUND(tmin, 1) AS STRING), '.', ',')                               AS `Mín (°C)`,\n",
+        "  REPLACE(CAST(ROUND(chuva, 1) AS STRING), '.', ',')                              AS `Chuva (mm)`,\n",
+        "  CASE WHEN pmax IS NULL THEN '—'\n",
+        "       ELSE CONCAT(CASE WHEN pmax >= 70 THEN '🔴 ' WHEN pmax >= 40 THEN '🟠 '\n",
+        "                        WHEN pmax >= 20 THEN '🟡 ' ELSE '🟢 ' END, CAST(pmax AS INT), '%') END\n",
+        "                                                                                  AS `Chance máx. de chuva`,\n",
+        "  horas_chuva                                                                     AS `Horas com chuva (≥ 0,5 mm)`,\n",
+        "  COALESCE(CAST(CAST(ROUND(rajada) AS INT) AS STRING), '—')                       AS `Rajada máx. (km/h)`\n",
+        "FROM a CROSS JOIN hoje\n",
+        "ORDER BY a.dia\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "532c891d",
+      "displayName": "Agora",
+      "layout": [
+        {
+          "widget": {
+            "name": "chance-chuva-api",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ap01",
+                  "fields": [
+                    {
+                      "name": "Chance de chuva",
+                      "expression": "`Chance de chuva`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "☔ Chance de chuva — próxima hora e próximas 6 h (Open-Meteo)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Chance de chuva"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "proxima-hora",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "041621a7",
+                  "fields": [
+                    {
+                      "name": "Próxima Hora",
+                      "expression": "`Próxima Hora`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌂 Modelo champion — próxima hora (rótulo Open-Meteo)",
+                "showDescription": false,
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Próxima Hora"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "chuva-medida-proxima-hora",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "rg01",
+                  "fields": [
+                    {
+                      "name": "Chuva medida",
+                      "expression": "`Chuva medida`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌧️ Modelo regional — chuva medida na próxima hora (INMET)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Chuva medida"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 7,
+            "y": 0,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "temp-max-min",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "mm01",
+                  "fields": [
+                    {
+                      "name": "Máx / Mín",
+                      "expression": "`Máx / Mín`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌡️ Máx / Mín do dia",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Máx / Mín"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 0,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "avisos-ativos",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "av01",
+                  "fields": [
+                    {
+                      "name": "Avisos",
+                      "expression": "`Avisos`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "⚠️ Avisos oficiais ativos (INMET · repassados pela Defesa Civil)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Avisos"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "status-pipeline",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "st01",
+                  "fields": [
+                    {
+                      "name": "Status",
+                      "expression": "`Status`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🛰️ Status do pipeline (atualiza a cada hora)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Status"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "status-celular",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cel01",
+                  "fields": [
+                    {
+                      "name": "Celular",
+                      "expression": "`Celular`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "📱 Coletor do INMET (celular)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Celular"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 3,
+            "width": 3,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "chuva-mes-vs-normal",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ac01",
+                  "fields": [
+                    {
+                      "name": "Chuva no mês",
+                      "expression": "`Chuva no mês`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "☔ Chuva no mês até agora (vs média 1991–2020)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Chuva no mês"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "chuva-7d-vs-normal",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ac01",
+                  "fields": [
+                    {
+                      "name": "Chuva 7 dias",
+                      "expression": "`Chuva 7 dias`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🗓️ Chuva nos últimos 7 dias (vs média 1991–2020)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Chuva 7 dias"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 6,
+            "width": 6,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "avisos-tabela",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "av02",
+                  "fields": [
+                    {
+                      "name": "Situação",
+                      "expression": "`Situação`"
+                    },
+                    {
+                      "name": "Aviso",
+                      "expression": "`Aviso`"
+                    },
+                    {
+                      "name": "Severidade",
+                      "expression": "`Severidade`"
+                    },
+                    {
+                      "name": "Início",
+                      "expression": "`Início`"
+                    },
+                    {
+                      "name": "Fim",
+                      "expression": "`Fim`"
+                    },
+                    {
+                      "name": "Chuva observada",
+                      "expression": "`Chuva observada`"
+                    },
+                    {
+                      "name": "Champion: horas com alerta",
+                      "expression": "`Champion: horas com alerta`"
+                    },
+                    {
+                      "name": "Regional: horas com alerta",
+                      "expression": "`Regional: horas com alerta`"
+                    },
+                    {
+                      "name": "Riscos",
+                      "expression": "`Riscos`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "📢 Avisos oficiais para a cidade — ativos, próximos e últimos 7 dias (INMET) × chuva observada × modelos"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Situação"
+                  },
+                  {
+                    "fieldName": "Aviso"
+                  },
+                  {
+                    "fieldName": "Severidade"
+                  },
+                  {
+                    "fieldName": "Início"
+                  },
+                  {
+                    "fieldName": "Fim"
+                  },
+                  {
+                    "fieldName": "Chuva observada"
+                  },
+                  {
+                    "fieldName": "Champion: horas com alerta"
+                  },
+                  {
+                    "fieldName": "Regional: horas com alerta"
+                  },
+                  {
+                    "fieldName": "Riscos"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "proximas-48h",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "p48h",
+                  "fields": [
+                    {
+                      "name": "hora",
+                      "expression": "`hora`"
+                    },
+                    {
+                      "name": "chuva_mm",
+                      "expression": "`chuva_mm`"
+                    },
+                    {
+                      "name": "chance_api_pct",
+                      "expression": "`chance_api_pct`"
+                    },
+                    {
+                      "name": "champion_pct",
+                      "expression": "`champion_pct`"
+                    },
+                    {
+                      "name": "regional_pct",
+                      "expression": "`regional_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "combo",
+              "frame": {
+                "showTitle": true,
+                "title": "🌧️ Próximas 48 h — chuva prevista (mm) e chance de chuva (%) · modelos só nas próximas 24 h",
+                "headerAlignment": "center"
+              },
+              "mark": {
+                "colors": [
+                  "#5DADE2",
+                  "#2C3E50",
+                  "#F39C12",
+                  "#8E44AD"
+                ]
+              },
+              "encodings": {
+                "x": {
+                  "fieldName": "hora",
+                  "displayName": "Hora",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "chuva_mm",
+                        "displayName": "Chuva prevista (mm)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "chance_api_pct",
+                        "displayName": "Chance de chuva — Open-Meteo (%)"
+                      },
+                      {
+                        "fieldName": "champion_pct",
+                        "displayName": "Champion (%)"
+                      },
+                      {
+                        "fieldName": "regional_pct",
+                        "displayName": "Regional — chuva medida (%)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  }
+                },
+                "label": {
+                  "show": false
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "proximos-7-dias",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "d7d",
+                  "fields": [
+                    {
+                      "name": "Dia",
+                      "expression": "`Dia`"
+                    },
+                    {
+                      "name": "Máx (°C)",
+                      "expression": "`Máx (°C)`"
+                    },
+                    {
+                      "name": "Mín (°C)",
+                      "expression": "`Mín (°C)`"
+                    },
+                    {
+                      "name": "Chuva (mm)",
+                      "expression": "`Chuva (mm)`"
+                    },
+                    {
+                      "name": "Chance máx. de chuva",
+                      "expression": "`Chance máx. de chuva`"
+                    },
+                    {
+                      "name": "Horas com chuva (≥ 0,5 mm)",
+                      "expression": "`Horas com chuva (≥ 0,5 mm)`"
+                    },
+                    {
+                      "name": "Rajada máx. (km/h)",
+                      "expression": "`Rajada máx. (km/h)`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "📅 Próximos 7 dias (Open-Meteo)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Dia"
+                  },
+                  {
+                    "fieldName": "Máx (°C)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Mín (°C)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Chuva (mm)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Chance máx. de chuva",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Horas com chuva (≥ 0,5 mm)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Rajada máx. (km/h)",
+                    "contentAlignment": "center"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "temperatura-hoje-vs-normal",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "tn01",
+                  "fields": [
+                    {
+                      "name": "hora",
+                      "expression": "`hora`"
+                    },
+                    {
+                      "name": "temperatura",
+                      "expression": "`temperatura`"
+                    },
+                    {
+                      "name": "normal",
+                      "expression": "`normal`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "🌡️ Temperatura de hoje vs média histórica (por hora)",
+                "headerAlignment": "center"
+              },
+              "mark": {
+                "colors": [
+                  "#E74C3C",
+                  "#7F8C8D",
+                  "#3498DB",
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "hora",
+                  "displayName": "Hora",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fields": [
+                    {
+                      "fieldName": "temperatura",
+                      "displayName": "Hoje (observado + previsão)"
+                    },
+                    {
+                      "fieldName": "normal",
+                      "displayName": "Média 1991–2020 (±7 dias)"
+                    }
+                  ],
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Temperatura (°C)",
+                    "hideGrid": false,
+                    "hideLabels": false
+                  },
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "all"
+                    },
+                    "significantFigures": {
+                      "type": "all"
+                    },
+                    "hideGroupSeparator": false
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 27,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "estacao-chuva",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "es01",
+                  "fields": [
+                    {
+                      "name": "Chuva na estação",
+                      "expression": "`Chuva na estação`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "☔ Chuva na estação desde 1/jul (vs normal 1991–2020)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Chuva na estação"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 33,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "estacao-inicio",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "es01",
+                  "fields": [
+                    {
+                      "name": "Início da estação chuvosa",
+                      "expression": "`Início da estação chuvosa`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌱 Início da estação chuvosa (Liebmann)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Início da estação chuvosa"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 33,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "estacao-calor",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "es01",
+                  "fields": [
+                    {
+                      "name": "Dias com máxima ≥ 35 °C",
+                      "expression": "`Dias com máxima ≥ 35 °C`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🔥 Dias com máxima ≥ 35 °C desde 1/jul",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Dias com máxima ≥ 35 °C"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 33,
+            "width": 4,
+            "height": 3
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "pg-modelo",
+      "displayName": "Modelo",
+      "layout": [
+        {
+          "widget": {
+            "name": "modelo-vs-realidade",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0d8e8691",
+                  "fields": [
+                    {
+                      "name": "horas_rel",
+                      "expression": "`horas_rel`"
+                    },
+                    {
+                      "name": "choveu_real",
+                      "expression": "`choveu_real`"
+                    },
+                    {
+                      "name": "prob_modelo_pct",
+                      "expression": "`prob_modelo_pct`"
+                    },
+                    {
+                      "name": "threshold_pct",
+                      "expression": "`threshold_pct`"
+                    },
+                    {
+                      "name": "prob_regional_pct",
+                      "expression": "`prob_regional_pct`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "mark": {
+                "colors": [
+                  "#2E86C1",
+                  "#F39C12",
+                  "#95A5A6",
+                  "#8E44AD"
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "📈 Modelo vs Realidade — champion, regional (chuva medida) e chuva observada (−6h a +18h)"
+              },
+              "widgetType": "combo",
+              "encodings": {
+                "label": {
+                  "show": true
+                },
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "choveu_real",
+                        "displayName": "Choveu (observado)"
+                      }
+                    ]
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "prob_modelo_pct",
+                        "displayName": "Champion (%)"
+                      },
+                      {
+                        "fieldName": "threshold_pct",
+                        "displayName": "Limiar do champion"
+                      },
+                      {
+                        "fieldName": "prob_regional_pct",
+                        "displayName": "Chance de chuva medida — regional (%)"
+                      }
+                    ]
+                  },
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  }
+                },
+                "x": {
+                  "fieldName": "horas_rel",
+                  "displayName": "Horas em relação a agora (0 = hora atual)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "acuracia-modelo-tabela-diagnostico",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "a8420f1c",
+                  "fields": [
+                    {
+                      "name": "Métrica",
+                      "expression": "`Métrica`"
+                    },
+                    {
+                      "name": "Modelo (produção)",
+                      "expression": "`Modelo (produção)`"
+                    },
+                    {
+                      "name": "API Open-Meteo (produção)",
+                      "expression": "`API Open-Meteo (produção)`"
+                    },
+                    {
+                      "name": "Modelo (teste 12 meses)",
+                      "expression": "`Modelo (teste 12 meses)`"
+                    },
+                    {
+                      "name": "Modelo vs chuva medida (INMET)",
+                      "expression": "`Modelo vs chuva medida (INMET)`"
+                    },
+                    {
+                      "name": "Regional vs chuva medida (INMET)",
+                      "expression": "`Regional vs chuva medida (INMET)`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🎯 Desempenho — produção: todas as versões, última previsão antes de cada hora · teste: champion atual · chuva medida: validação semanal (INMET)"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Métrica"
+                  },
+                  {
+                    "fieldName": "Modelo (produção)"
+                  },
+                  {
+                    "fieldName": "API Open-Meteo (produção)"
+                  },
+                  {
+                    "fieldName": "Modelo (teste 12 meses)"
+                  },
+                  {
+                    "fieldName": "Modelo vs chuva medida (INMET)"
+                  },
+                  {
+                    "fieldName": "Regional vs chuva medida (INMET)"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "acuracia-por-antecedencia",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "ld01",
+                  "fields": [
+                    {
+                      "name": "Antecedência",
+                      "expression": "`Antecedência`"
+                    },
+                    {
+                      "name": "Horas avaliadas",
+                      "expression": "`Horas avaliadas`"
+                    },
+                    {
+                      "name": "F1 modelo",
+                      "expression": "`F1 modelo`"
+                    },
+                    {
+                      "name": "F1 API Open-Meteo",
+                      "expression": "`F1 API Open-Meteo`"
+                    },
+                    {
+                      "name": "Precisão modelo",
+                      "expression": "`Precisão modelo`"
+                    },
+                    {
+                      "name": "Recall modelo",
+                      "expression": "`Recall modelo`"
+                    },
+                    {
+                      "name": "Modelo",
+                      "expression": "`Modelo`"
+                    },
+                    {
+                      "name": "Avaliado desde",
+                      "expression": "`Avaliado desde`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "⏱️ Acurácia por antecedência — só a versão atual do champion, todas as rodadas (⏳ = menos de 48 h avaliadas)"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Antecedência"
+                  },
+                  {
+                    "fieldName": "Horas avaliadas"
+                  },
+                  {
+                    "fieldName": "F1 modelo"
+                  },
+                  {
+                    "fieldName": "F1 API Open-Meteo"
+                  },
+                  {
+                    "fieldName": "Precisão modelo"
+                  },
+                  {
+                    "fieldName": "Recall modelo"
+                  },
+                  {
+                    "fieldName": "Modelo"
+                  },
+                  {
+                    "fieldName": "Avaliado desde",
+                    "contentAlignment": "center"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 14,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "resumo-de-alertas",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "a11b61da",
+                  "fields": [
+                    {
+                      "name": "Quando",
+                      "expression": "`Quando`"
+                    },
+                    {
+                      "name": "Tipo",
+                      "expression": "`Tipo`"
+                    },
+                    {
+                      "name": "Temp (°C)",
+                      "expression": "`Temp (°C)`"
+                    },
+                    {
+                      "name": "Sensação (°C)",
+                      "expression": "`Sensação (°C)`"
+                    },
+                    {
+                      "name": "Diferença p/ média histórica (°C)",
+                      "expression": "`Diferença p/ média histórica (°C)`"
+                    },
+                    {
+                      "name": "Faixa de temperatura",
+                      "expression": "`Faixa de temperatura`"
+                    },
+                    {
+                      "name": "Chuva",
+                      "expression": "`Chuva`"
+                    },
+                    {
+                      "name": "Umidade (%)",
+                      "expression": "`Umidade (%)`"
+                    },
+                    {
+                      "name": "Modelo (chance de chuva)",
+                      "expression": "`Modelo (chance de chuva)`"
+                    },
+                    {
+                      "name": "Regional (chuva medida)",
+                      "expression": "`Regional (chuva medida)`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "📋 Hora a hora — hoje e amanhã (observado, previsão e modelos)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Quando",
+                    "contentAlignment": "left"
+                  },
+                  {
+                    "fieldName": "Tipo"
+                  },
+                  {
+                    "fieldName": "Temp (°C)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Sensação (°C)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Diferença p/ média histórica (°C)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Faixa de temperatura"
+                  },
+                  {
+                    "fieldName": "Chuva"
+                  },
+                  {
+                    "fieldName": "Umidade (%)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Modelo (chance de chuva)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Regional (chuva medida)",
+                    "contentAlignment": "center"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 12,
+            "height": 9
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "pg-clima",
+      "displayName": "Clima e ENSO",
+      "layout": [
+        {
+          "widget": {
+            "name": "enso-atual",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en01",
+                  "fields": [
+                    {
+                      "name": "ENSO",
+                      "expression": "`ENSO`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌊 ENSO agora (ONI · NOAA)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "ENSO"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-oni-historico",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en02",
+                  "fields": [
+                    {
+                      "name": "ano",
+                      "expression": "`ano`"
+                    },
+                    {
+                      "name": "oni",
+                      "expression": "`oni`"
+                    },
+                    {
+                      "name": "limiar_el_nino",
+                      "expression": "`limiar_el_nino`"
+                    },
+                    {
+                      "name": "limiar_la_nina",
+                      "expression": "`limiar_la_nina`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "🌊 Índice ONI — últimos 15 anos (El Niño ≥ +0,5 · La Niña ≤ −0,5)",
+                "headerAlignment": "center"
+              },
+              "mark": {
+                "colors": [
+                  "#2C3E50",
+                  "#E74C3C",
+                  "#3498DB"
+                ]
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "ano",
+                  "displayName": "Ano",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "oni",
+                      "displayName": "ONI (°C)"
+                    },
+                    {
+                      "fieldName": "limiar_el_nino",
+                      "displayName": "Limiar El Niño"
+                    },
+                    {
+                      "fieldName": "limiar_la_nina",
+                      "displayName": "Limiar La Niña"
+                    }
+                  ]
+                },
+                "label": {
+                  "show": false
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 8,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-tendencia",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en01",
+                  "fields": [
+                    {
+                      "name": "Tendência",
+                      "expression": "`Tendência`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🌡️ Tendência do Pacífico (último trimestre)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Tendência"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "estacao-chuva-acumulada",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "es02",
+                  "fields": [
+                    {
+                      "name": "data",
+                      "expression": "`data`"
+                    },
+                    {
+                      "name": "atual",
+                      "expression": "`atual`"
+                    },
+                    {
+                      "name": "normal_p10",
+                      "expression": "`normal_p10`"
+                    },
+                    {
+                      "name": "normal_p50",
+                      "expression": "`normal_p50`"
+                    },
+                    {
+                      "name": "normal_p90",
+                      "expression": "`normal_p90`"
+                    },
+                    {
+                      "name": "analogos",
+                      "expression": "`analogos`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🌧️ Chuva acumulada desde 1/jul — estação atual × normal 1991–2020 × anos com ONI parecido"
+              },
+              "mark": {
+                "colors": [
+                  "#2C3E50",
+                  "#E59866",
+                  "#7F8C8D",
+                  "#5DADE2",
+                  "#E74C3C"
+                ]
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "data",
+                  "displayName": "Data",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fields": [
+                    {
+                      "fieldName": "atual",
+                      "displayName": "Estação atual"
+                    },
+                    {
+                      "fieldName": "normal_p10",
+                      "displayName": "Normal — 10% mais secas"
+                    },
+                    {
+                      "fieldName": "normal_p50",
+                      "displayName": "Normal — mediana (1991–2020)"
+                    },
+                    {
+                      "fieldName": "normal_p90",
+                      "displayName": "Normal — 10% mais chuvosas"
+                    },
+                    {
+                      "fieldName": "analogos",
+                      "displayName": "Anos com ONI parecido — mediana"
+                    }
+                  ],
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Chuva acumulada (mm)",
+                    "hideGrid": false,
+                    "hideLabels": false
+                  }
+                },
+                "label": {
+                  "show": false
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "estacao-analogos",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "es03",
+                  "fields": [
+                    {
+                      "name": "Estação",
+                      "expression": "`Estação`"
+                    },
+                    {
+                      "name": "ONI",
+                      "expression": "`ONI`"
+                    },
+                    {
+                      "name": "Chuva até hoje (mm)",
+                      "expression": "`Chuva até hoje (mm)`"
+                    },
+                    {
+                      "name": "Dias ≥ 35 °C até hoje",
+                      "expression": "`Dias ≥ 35 °C até hoje`"
+                    },
+                    {
+                      "name": "Início da estação chuvosa",
+                      "expression": "`Início da estação chuvosa`"
+                    },
+                    {
+                      "name": "Chuva jul–jun (mm)",
+                      "expression": "`Chuva jul–jun (mm)`"
+                    },
+                    {
+                      "name": "Dias ≥ 35 °C jul–jun",
+                      "expression": "`Dias ≥ 35 °C jul–jun`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🗓️ Estação atual × os 5 anos com ONI mais parecido × normal (até a mesma data e no ano hidrológico jul–jun)"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Estação"
+                  },
+                  {
+                    "fieldName": "ONI"
+                  },
+                  {
+                    "fieldName": "Chuva até hoje (mm)"
+                  },
+                  {
+                    "fieldName": "Dias ≥ 35 °C até hoje"
+                  },
+                  {
+                    "fieldName": "Início da estação chuvosa"
+                  },
+                  {
+                    "fieldName": "Chuva jul–jun (mm)"
+                  },
+                  {
+                    "fieldName": "Dias ≥ 35 °C jul–jun"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-previsibilidade",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en04",
+                  "fields": [
+                    {
+                      "name": "Previsibilidade",
+                      "expression": "`Previsibilidade`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "title": "🔮 O ONI prevê se o trimestre será seco, normal ou chuvoso? (teste retroativo desde 1950)",
+                "headerAlignment": "center"
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Previsibilidade"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 18,
+            "width": 12,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-impacto",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en03",
+                  "fields": [
+                    {
+                      "name": "Trimestre",
+                      "expression": "`Trimestre`"
+                    },
+                    {
+                      "name": "Chuva · El Niño · modelo (1950+)",
+                      "expression": "`Chuva · El Niño · modelo (1950+)`"
+                    },
+                    {
+                      "name": "Chuva · El Niño · pluviômetros (1950–2024)",
+                      "expression": "`Chuva · El Niño · pluviômetros (1950–2024)`"
+                    },
+                    {
+                      "name": "Chuva · El Niño · INMET (2007+)",
+                      "expression": "`Chuva · El Niño · INMET (2007+)`"
+                    },
+                    {
+                      "name": "Chuva · La Niña · modelo",
+                      "expression": "`Chuva · La Niña · modelo`"
+                    },
+                    {
+                      "name": "Chuva · La Niña · pluviômetros",
+                      "expression": "`Chuva · La Niña · pluviômetros`"
+                    },
+                    {
+                      "name": "Máxima · El Niño ≥ moderado",
+                      "expression": "`Máxima · El Niño ≥ moderado`"
+                    },
+                    {
+                      "name": "Dias ≥ 35 °C · El Niño ≥ moderado",
+                      "expression": "`Dias ≥ 35 °C · El Niño ≥ moderado`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🌊 O que o El Niño e a La Niña mudam em Birigui — anomalia média do trimestre × demais anos, sem tendência (chuva em % da normal; ✳️ p < 0,05 isolado — nenhum passa na correção para ~740 testes)"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Trimestre"
+                  },
+                  {
+                    "fieldName": "Chuva · El Niño · modelo (1950+)"
+                  },
+                  {
+                    "fieldName": "Chuva · El Niño · pluviômetros (1950–2024)"
+                  },
+                  {
+                    "fieldName": "Chuva · El Niño · INMET (2007+)"
+                  },
+                  {
+                    "fieldName": "Chuva · La Niña · modelo"
+                  },
+                  {
+                    "fieldName": "Chuva · La Niña · pluviômetros"
+                  },
+                  {
+                    "fieldName": "Máxima · El Niño ≥ moderado"
+                  },
+                  {
+                    "fieldName": "Dias ≥ 35 °C · El Niño ≥ moderado"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 21,
+            "width": 12,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-acuracia-resumo",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en05",
+                  "fields": [
+                    {
+                      "name": "Previsão",
+                      "expression": "`Previsão`"
+                    },
+                    {
+                      "name": "Antecedência",
+                      "expression": "`Antecedência`"
+                    },
+                    {
+                      "name": "Meses do ano comparáveis",
+                      "expression": "`Meses do ano comparáveis`"
+                    },
+                    {
+                      "name": "F1 com El Niño",
+                      "expression": "`F1 com El Niño`"
+                    },
+                    {
+                      "name": "F1 nos mesmos meses sem El Niño",
+                      "expression": "`F1 nos mesmos meses sem El Niño`"
+                    },
+                    {
+                      "name": "Diferença",
+                      "expression": "`Diferença`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🎯 A previsão erra mais com El Niño? F1 de \"vai chover na hora\" nos mesmos meses do calendário, com e sem El Niño"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Previsão"
+                  },
+                  {
+                    "fieldName": "Antecedência"
+                  },
+                  {
+                    "fieldName": "Meses do ano comparáveis"
+                  },
+                  {
+                    "fieldName": "F1 com El Niño"
+                  },
+                  {
+                    "fieldName": "F1 nos mesmos meses sem El Niño"
+                  },
+                  {
+                    "fieldName": "Diferença"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 29,
+            "width": 12,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "enso-acuracia-mensal",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "en06",
+                  "fields": [
+                    {
+                      "name": "Mês",
+                      "expression": "`Mês`"
+                    },
+                    {
+                      "name": "Anos com El Niño",
+                      "expression": "`Anos com El Niño`"
+                    },
+                    {
+                      "name": "F1 com El Niño",
+                      "expression": "`F1 com El Niño`"
+                    },
+                    {
+                      "name": "Horas de chuva (El Niño)",
+                      "expression": "`Horas de chuva (El Niño)`"
+                    },
+                    {
+                      "name": "Anos sem El Niño",
+                      "expression": "`Anos sem El Niño`"
+                    },
+                    {
+                      "name": "F1 sem El Niño",
+                      "expression": "`F1 sem El Niño`"
+                    },
+                    {
+                      "name": "Horas de chuva (sem El Niño)",
+                      "expression": "`Horas de chuva (sem El Niño)`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "📅 API Open-Meteo (rodada de 1 dia antes), mês a mês — meses secos têm poucas horas de chuva e o F1 oscila"
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Mês"
+                  },
+                  {
+                    "fieldName": "Anos com El Niño"
+                  },
+                  {
+                    "fieldName": "F1 com El Niño"
+                  },
+                  {
+                    "fieldName": "Horas de chuva (El Niño)"
+                  },
+                  {
+                    "fieldName": "Anos sem El Niño"
+                  },
+                  {
+                    "fieldName": "F1 sem El Niño"
+                  },
+                  {
+                    "fieldName": "Horas de chuva (sem El Niño)"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 33,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "precipitacao-por-mes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "6a3845f3",
+                  "fields": [
+                    {
+                      "name": "mes_nome",
+                      "expression": "`mes_nome`"
+                    },
+                    {
+                      "name": "precip_media_mensal_acum",
+                      "expression": "`precip_media_mensal_acum`"
+                    },
+                    {
+                      "name": "pct_dias_com_chuva",
+                      "expression": "`pct_dias_com_chuva`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "mark": {
+                "colors": [
+                  "#2E86C1",
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 2
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 3
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 4
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 5
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "Precipitação por Mês (média 1991–2020)"
+              },
+              "widgetType": "combo",
+              "encodings": {
+                "label": {
+                  "show": true
+                },
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "precip_media_mensal_acum",
+                        "displayName": "Precipitação acumulada (mm)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "pct_dias_com_chuva",
+                        "displayName": "% dias com chuva (≥ 1 mm)"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  }
+                },
+                "x": {
+                  "fieldName": "mes_nome",
+                  "axis": {
+                    "hideLabels": false
+                  },
+                  "displayName": "Mês",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Jan",
+                        "Fev",
+                        "Mar",
+                        "Abr",
+                        "Mai",
+                        "Jun",
+                        "Jul",
+                        "Ago",
+                        "Set",
+                        "Out",
+                        "Nov",
+                        "Dez"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 40,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "temperatura-historica-por-mes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "46c331e3",
+                  "fields": [
+                    {
+                      "name": "mes_nome",
+                      "expression": "`mes_nome`"
+                    },
+                    {
+                      "name": "temp_max_media",
+                      "expression": "`temp_max_media`"
+                    },
+                    {
+                      "name": "temp_media",
+                      "expression": "`temp_media`"
+                    },
+                    {
+                      "name": "temp_min_media",
+                      "expression": "`temp_min_media`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "Temperatura por Mês (média 1991–2020)",
+                "headerAlignment": "center"
+              },
+              "mark": {
+                "colors": [
+                  "#E74C3C",
+                  "#F39C12",
+                  "#3498DB",
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "mes_nome",
+                  "axis": {
+                    "labelAngle": 0
+                  },
+                  "displayName": "Mês",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Jan",
+                        "Fev",
+                        "Mar",
+                        "Abr",
+                        "Mai",
+                        "Jun",
+                        "Jul",
+                        "Ago",
+                        "Set",
+                        "Out",
+                        "Nov",
+                        "Dez"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fields": [
+                    {
+                      "fieldName": "temp_max_media",
+                      "displayName": "Temperatura máxima"
+                    },
+                    {
+                      "fieldName": "temp_media",
+                      "displayName": "Média Temperatura"
+                    },
+                    {
+                      "fieldName": "temp_min_media",
+                      "displayName": "Temperatura Mínima"
+                    }
+                  ],
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "axis": {
+                    "title": "Temperatura (°C)",
+                    "hideGrid": false,
+                    "hideLabels": false
+                  },
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "none",
+                    "decimalPlaces": {
+                      "type": "all"
+                    },
+                    "significantFigures": {
+                      "type": "all"
+                    },
+                    "hideGroupSeparator": false
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 40,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "tendencia-anual-de-temperatura",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "c905273f",
+                  "fields": [
+                    {
+                      "name": "year",
+                      "expression": "`year`"
+                    },
+                    {
+                      "name": "sum(temp_max_anual)",
+                      "expression": "SUM(`temp_max_anual`)"
+                    },
+                    {
+                      "name": "sum(temp_media_anual)",
+                      "expression": "SUM(`temp_media_anual`)"
+                    },
+                    {
+                      "name": "sum(temp_min_anual)",
+                      "expression": "SUM(`temp_min_anual`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "showTitle": true,
+                "title": "Tendência Anual de Temperatura (anos completos)",
+                "headerAlignment": "center"
+              },
+              "mark": {
+                "colors": [
+                  "#E74C3C",
+                  "#F39C12",
+                  "#3498DB",
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 4
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 5
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "year",
+                  "displayName": "Anos",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "fields": [
+                    {
+                      "fieldName": "sum(temp_max_anual)",
+                      "displayName": "Temperatura Máxima Anual"
+                    },
+                    {
+                      "fieldName": "sum(temp_media_anual)",
+                      "displayName": "Temperatura Média Anual"
+                    },
+                    {
+                      "fieldName": "sum(temp_min_anual)",
+                      "displayName": "Temperatura Mínima Anual"
+                    }
+                  ],
+                  "axis": {
+                    "title": "Temperatura média anual (°C)"
+                  }
+                },
+                "label": {
+                  "show": false
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 48,
+            "width": 12,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}
