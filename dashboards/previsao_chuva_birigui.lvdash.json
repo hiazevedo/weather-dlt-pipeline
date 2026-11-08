@@ -773,7 +773,7 @@
       "name": "p48h",
       "displayName": "Próximas 48 h — chuva prevista e chance de chuva",
       "queryLines": [
-        "-- Chuva prevista (mm) e chance de chuva: Open-Meteo, champion e regional (24 h)\n",
+        "-- Chuva prevista (mm) e chance de chuva: Open-Meteo, champion e regional (24 h), 6 modelos (48 h)\n",
         "WITH f AS (\n",
         "  SELECT observation_time, precipitation, precipitation_probability\n",
         "  FROM weather_pipeline.silver.weather_forecast\n",
@@ -785,9 +785,11 @@
         "  ROUND(CAST(f.precipitation AS DOUBLE), 1) AS chuva_mm,\n",
         "  f.precipitation_probability               AS chance_api_pct,\n",
         "  ROUND(m.prob_chuva * 100)                 AS champion_pct,\n",
-        "  ROUND(m.prob_chuva_medida * 100)          AS regional_pct\n",
+        "  ROUND(m.prob_chuva_medida * 100)          AS regional_pct,\n",
+        "  ROUND(x.prob_chuva_medida * 100)          AS mos_pct\n",
         "FROM f\n",
         "LEFT JOIN weather_pipeline.gold.rain_forecast_ml m ON m.target_time = f.observation_time\n",
+        "LEFT JOIN weather_pipeline.gold.rain_forecast_mos x ON x.target_time = f.observation_time\n",
         "ORDER BY hora\n"
       ]
     },
@@ -826,6 +828,46 @@
         "  COALESCE(CAST(CAST(ROUND(rajada) AS INT) AS STRING), '—')                       AS `Rajada máx. (km/h)`\n",
         "FROM a CROSS JOIN hoje\n",
         "ORDER BY a.dia\n"
+      ]
+    },
+    {
+      "name": "mos01",
+      "displayName": "Amanhã — chuva medida (6 modelos)",
+      "queryLines": [
+        "-- MOS multimodelo (17_inference_mos_multimodelo, a cada 3 h): chance de chuva MEDIDA\n",
+        "-- em cada hora de amanhã, combinando ECMWF, GFS, ICON, JMA, GEM e best_match\n",
+        "WITH a AS (\n",
+        "  SELECT * FROM weather_pipeline.gold.rain_forecast_mos\n",
+        "  WHERE DATE(target_time) = date_add(DATE(from_utc_timestamp(current_timestamp(), 'America/Sao_Paulo')), 1)\n",
+        ")\n",
+        "SELECT CASE\n",
+        "  WHEN count(*) = 0 THEN '⚪ indisponível'\n",
+        "  WHEN sum(pred_chuva_medida) > 0 THEN CONCAT('🌧️ Sim · ', sum(pred_chuva_medida), ' h com chuva · até ',\n",
+        "       CAST(ROUND(max(prob_chuva_medida) * 100) AS INT), '% às ',\n",
+        "       LPAD(CAST(HOUR(max_by(target_time, prob_chuva_medida)) AS STRING), 2, '0'), 'h')\n",
+        "  ELSE CONCAT('☀️ Não · máx. ', CAST(ROUND(max(prob_chuva_medida) * 100) AS INT), '% (limiar ',\n",
+        "       CAST(ROUND(max(threshold) * 100) AS INT), '%)')\n",
+        "END AS `Amanhã`\n",
+        "FROM a\n"
+      ]
+    },
+    {
+      "name": "mos02",
+      "displayName": "MOS multimodelo — versões",
+      "queryLines": [
+        "-- Versões do MOS multimodelo (16_train_mos_multimodelo): avaliação com cada estação do\n",
+        "-- INMET fora do treino, nos últimos 12 meses com rótulo, contra a API nas mesmas horas\n",
+        "SELECT\n",
+        "  CONCAT('v', version)                                AS `Versão`,\n",
+        "  date_format(created_at, 'dd/MM/yyyy')               AS `Treinada em`,\n",
+        "  CASE WHEN promoted THEN '✅' ELSE '—' END           AS `Promovida`,\n",
+        "  ROUND(f1, 3)                                        AS `F1 (chuva medida)`,\n",
+        "  ROUND(f1_api, 3)                                    AS `F1 da API (mesmas horas)`,\n",
+        "  ROUND(auc_roc, 3)                                   AS `AUC`,\n",
+        "  CONCAT(CAST(ROUND(threshold * 100, 1) AS STRING), '%') AS `Limiar`,\n",
+        "  test_size                                           AS `Horas de teste`\n",
+        "FROM weather_pipeline.gold.rain_mos_versions\n",
+        "ORDER BY version DESC\n"
       ]
     }
   ],
@@ -870,7 +912,7 @@
           "position": {
             "x": 0,
             "y": 0,
-            "width": 4,
+            "width": 3,
             "height": 3
           }
         },
@@ -909,7 +951,7 @@
             }
           },
           "position": {
-            "x": 4,
+            "x": 3,
             "y": 0,
             "width": 3,
             "height": 3
@@ -949,7 +991,7 @@
             }
           },
           "position": {
-            "x": 7,
+            "x": 6,
             "y": 0,
             "width": 3,
             "height": 3
@@ -989,8 +1031,8 @@
             }
           },
           "position": {
-            "x": 10,
-            "y": 0,
+            "x": 4,
+            "y": 3,
             "width": 2,
             "height": 3
           }
@@ -1031,7 +1073,7 @@
           "position": {
             "x": 0,
             "y": 3,
-            "width": 6,
+            "width": 4,
             "height": 3
           }
         },
@@ -1321,6 +1363,10 @@
                     {
                       "name": "regional_pct",
                       "expression": "`regional_pct`"
+                    },
+                    {
+                      "name": "mos_pct",
+                      "expression": "`mos_pct`"
                     }
                   ],
                   "disaggregated": true
@@ -1332,7 +1378,7 @@
               "widgetType": "combo",
               "frame": {
                 "showTitle": true,
-                "title": "🌧️ Próximas 48 h — chuva prevista (mm) e chance de chuva (%) · modelos só nas próximas 24 h",
+                "title": "🌧️ Próximas 48 h — chuva prevista (mm) e chance de chuva (%) · champion e regional só nas próximas 24 h",
                 "headerAlignment": "center"
               },
               "mark": {
@@ -1340,7 +1386,8 @@
                   "#5DADE2",
                   "#2C3E50",
                   "#F39C12",
-                  "#8E44AD"
+                  "#8E44AD",
+                  "#16A085"
                 ]
               },
               "encodings": {
@@ -1376,6 +1423,10 @@
                       {
                         "fieldName": "regional_pct",
                         "displayName": "Regional — chuva medida (%)"
+                      },
+                      {
+                        "fieldName": "mos_pct",
+                        "displayName": "6 modelos — chuva medida (%)"
                       }
                     ],
                     "scale": {
@@ -1720,6 +1771,46 @@
             "x": 8,
             "y": 33,
             "width": 4,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "mos-amanha",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "mos01",
+                  "fields": [
+                    {
+                      "name": "Amanhã",
+                      "expression": "`Amanhã`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "Amanhã"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🛰️ Amanhã — chuva medida (combinação de 6 modelos)"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 0,
+            "width": 3,
             "height": 3
           }
         }
@@ -2113,6 +2204,104 @@
             "y": 19,
             "width": 12,
             "height": 9
+          }
+        },
+        {
+          "widget": {
+            "name": "mos-versoes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "mos02",
+                  "fields": [
+                    {
+                      "name": "Versão",
+                      "expression": "`Versão`"
+                    },
+                    {
+                      "name": "Treinada em",
+                      "expression": "`Treinada em`"
+                    },
+                    {
+                      "name": "Promovida",
+                      "expression": "`Promovida`"
+                    },
+                    {
+                      "name": "F1 (chuva medida)",
+                      "expression": "`F1 (chuva medida)`"
+                    },
+                    {
+                      "name": "F1 da API (mesmas horas)",
+                      "expression": "`F1 da API (mesmas horas)`"
+                    },
+                    {
+                      "name": "AUC",
+                      "expression": "`AUC`"
+                    },
+                    {
+                      "name": "Limiar",
+                      "expression": "`Limiar`"
+                    },
+                    {
+                      "name": "Horas de teste",
+                      "expression": "`Horas de teste`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "frame": {
+                "showTitle": true,
+                "headerAlignment": "center",
+                "title": "🛰️ MOS multimodelo — versões (cada estação do INMET fora do treino, contra a API)"
+              },
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "Versão"
+                  },
+                  {
+                    "fieldName": "Treinada em",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Promovida",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "F1 (chuva medida)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "F1 da API (mesmas horas)",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "AUC",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Limiar",
+                    "contentAlignment": "center"
+                  },
+                  {
+                    "fieldName": "Horas de teste",
+                    "contentAlignment": "center"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 28,
+            "width": 12,
+            "height": 4
           }
         }
       ],

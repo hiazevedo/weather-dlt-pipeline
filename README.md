@@ -167,8 +167,8 @@ usada no treino do modelo.
 - **Job de 1h lento** (> 30 min; o normal é ~6 min): e-mail de duração (`health`).
 - **Algo parou** sem falhar: o job `[weather] Vigia (a cada 3 h)` (`14_vigia`) falha,
   e o e-mail de falha sai, quando há mais de 2,5 h sem previsão nova da Open-Meteo,
-  sem execução completa do job de 1h ou sem sinal do celular, ou mais de 8 dias sem
-  o backfill semanal. Cada problema alerta uma vez e repete a cada 12 h
+  sem execução completa do job de 1h ou sem sinal do celular, mais de 7 h sem a
+  previsão dos 6 modelos (MOS, bundle de ML) ou mais de 8 dias sem o backfill semanal. Cada problema alerta uma vez e repete a cada 12 h
   (`gold.vigia_alertas`). Para testar o e-mail: rode o job com o parâmetro
   `simular=<texto>`.
 - **Limite:** se o Databricks bloquear todas as execuções do workspace (como de 02 a
@@ -385,8 +385,8 @@ Painel Lakeview (AI/BI) com 3 páginas. A definição fica versionada em
 
 | Página | O que mostra |
 |---|---|
-| **Agora** | Chance de chuva da Open-Meteo (próxima hora e próximas 6 h), champion e regional no limiar de cada um, máx/mín, avisos do INMET, status do pipeline e do celular, chuva no mês e em 7 dias, próximas 48 h (mm e chance), próximos 7 dias (máx, mín, chuva, chance, rajada), temperatura de hoje × normal e a estação chuvosa |
-| **Modelo** | Modelo × realidade (−6 h a +18 h), desempenho em produção, no teste e contra chuva medida, acurácia por antecedência e a tabela hora a hora |
+| **Agora** | Chance de chuva da Open-Meteo (próxima hora e próximas 6 h), champion e regional no limiar de cada um, amanhã com chuva medida pela combinação de 6 modelos (MOS), máx/mín, avisos do INMET, status do pipeline e do celular, chuva no mês e em 7 dias, próximas 48 h (mm e chance), próximos 7 dias (máx, mín, chuva, chance, rajada), temperatura de hoje × normal e a estação chuvosa |
+| **Modelo** | Modelo × realidade (−6 h a +18 h), desempenho em produção, no teste e contra chuva medida, acurácia por antecedência, a tabela hora a hora e as versões do MOS multimodelo |
 | **Clima e ENSO** | ONI, estação atual × normal × análogos, o estudo do ENSO e a climatologia 1991–2020 (dia com chuva = ≥ 1 mm) |
 
 O status do celular vem do sinal de vida que o `inmet_avisos_sync.py` grava a cada

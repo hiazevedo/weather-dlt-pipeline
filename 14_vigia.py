@@ -75,6 +75,14 @@ t = t and t.replace(tzinfo=pytz.utc).astimezone(TZ).replace(tzinfo=None)
 if t is None or AGORA - t > timedelta(days=8):
     problemas["job_semanal"] = f"Backfill semanal (Archive) sem rodar {ha(t)} (último em {t:%d/%m %H:%M})"
 
+# 5) MOS multimodelo (bundle de ML, a cada 3 h): chance de chuva medida dos 6 modelos
+try:
+    t = ultimo("SELECT max(inferencia_local) FROM weather_pipeline.gold.rain_forecast_mos")
+    if t is None or AGORA - t > timedelta(hours=7):
+        problemas["mos_multimodelo"] = f"Previsão dos 6 modelos (MOS) sem atualizar {ha(t)} (última em {t:%d/%m %H:%M})"
+except Exception as e:
+    problemas["mos_multimodelo"] = f"gold.rain_forecast_mos ilegível: {type(e).__name__}: {str(e)[:200]}"
+
 print(f"{AGORA:%d/%m %H:%M} — {len(problemas)} problema(s)")
 for k, v in problemas.items():
     print(f"  - [{k}] {v}")
