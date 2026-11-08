@@ -13,7 +13,10 @@ O que faz:
   1. baixa os avisos ativos e futuros (apiprevmet3.inmet.gov.br/avisos/ativos);
   2. mantém só os que tocam a UF do config.py (e só os municípios dessa UF);
   3. se algo mudou desde a última coleta, envia um snapshot JSON ao Volume
-     weather_pipeline.bronze.inmet_avisos e dispara o notebook 11_ingest_avisos.
+     weather_pipeline.bronze.inmet_avisos e dispara o notebook 11_ingest_avisos;
+  4. sempre (mesmo sem mudança ou com erro) grava o sinal de vida do coletor em
+     weather_pipeline.bronze.coletores/celular.json — o painel mostra há quanto
+     tempo o celular não dá notícia.
 
 Uso:
   python3 scripts/inmet_avisos_sync.py            # agendado a cada hora (cron do celular)
@@ -34,6 +37,7 @@ from inmet_sync import CACHE, UA, BUNDLE_FILES, carregar_config
 
 URL = "https://apiprevmet3.inmet.gov.br/avisos/ativos"
 VOLUME = "/Volumes/weather_pipeline/bronze/inmet_avisos"
+SINAL = "/Volumes/weather_pipeline/bronze/coletores/celular.json"
 CAMPOS = ["id", "id_aviso", "codigo", "descricao", "severidade", "id_severidade", "id_condicao_severa",
           "aviso_cor", "inicio", "fim", "data_inicio", "data_fim", "hora_inicio", "hora_fim",
           "riscos", "instrucoes", "estados", "regioes", "mesorregioes", "microrregioes",
@@ -57,6 +61,20 @@ def filtrar(avisos, uf, prefixo_ibge):
     return sorted(saida, key=lambda r: (str(r["id"]), str(r["updated_at"])))
 
 
+def enviar_sinal(resultado):
+    """Sinal de vida do coletor; uma falha aqui só vira aviso no log."""
+    try:
+        with tempfile.TemporaryDirectory(dir=CACHE) as tmp:
+            arq = pathlib.Path(tmp) / "sinal.json"
+            arq.write_text(json.dumps({"coletor": "celular", "script": "inmet_avisos_sync",
+                                       "enviado_em": dt.datetime.now().isoformat(timespec="seconds"),
+                                       "resultado": resultado[:300]}, ensure_ascii=False))
+            dbx.criar_volume("weather_pipeline", "bronze", "coletores")
+            dbx.enviar_arquivo(arq, SINAL)
+    except Exception as e:  # noqa: BLE001 — o sinal não pode derrubar a coleta
+        log.warning("sinal de vida não enviado: %s", e)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--forcar", action="store_true", help="envia mesmo se nada mudou")
@@ -65,6 +83,16 @@ def main():
     CACHE.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                         handlers=[logging.StreamHandler(), logging.FileHandler(CACHE / "inmet_avisos.log")])
+    try:
+        resultado = coletar(a.forcar)
+    except Exception as e:
+        enviar_sinal(f"erro: {type(e).__name__}: {e}")
+        raise
+    enviar_sinal(resultado)
+
+
+def coletar(forcar):
+    """Baixa, compara e (se mudou) envia os avisos; devolve um resumo para o sinal de vida."""
     cfg = carregar_config()
     uf = getattr(cfg, "UF", "SP")
     prefixo = str(getattr(cfg, "CIDADE_IBGE", "35"))[:2]          # 2 primeiros dígitos = UF
@@ -81,9 +109,9 @@ def main():
     estado = json.loads(estado_path.read_text()) if estado_path.exists() else {}
     log.info("avisos em %s: %d hoje, %d futuros | %s: %d (%s)", uf, len(snapshot["hoje"]), len(snapshot["futuro"]),
              cfg.CIDADE, len(cidade), "; ".join(f"{x['descricao']} – {x['severidade']}" for x in cidade) or "nenhum")
-    if not a.forcar and estado.get("assinatura") == assinatura:
+    if not forcar and estado.get("assinatura") == assinatura:
         log.info("sem mudanças desde %s — nada enviado", estado.get("enviado_em"))
-        return
+        return f"ok: sem mudanças ({len(cidade)} avisos na cidade)"
 
     agora = dt.datetime.now()
     payload = {"coletado_em": agora.isoformat(timespec="seconds"), "fonte": URL, "uf": uf, **snapshot}
@@ -98,6 +126,7 @@ def main():
                                    BUNDLE_FILES.format(user=dbx.usuario_atual()) + "/11_ingest_avisos")
     estado_path.write_text(json.dumps({"assinatura": assinatura, "enviado_em": agora.isoformat(timespec="seconds")}))
     log.info("snapshot enviado (%s) e ingestão disparada (run_id %s)", destino.rsplit("/", 1)[-1], run_id)
+    return f"ok: snapshot enviado ({len(cidade)} avisos na cidade)"
 
 
 if __name__ == "__main__":

@@ -38,6 +38,12 @@ Python) — a CLI do Databricks tem problema de DNS no Android.
 - Agenda: `crontab -l`. Os scripts se atualizam sozinhos (`git pull` diário às 4h30).
 - Token expirado: edite `~/.databrickscfg` com um token novo.
 - Rodar na mão: `cd ~/weather-dlt-pipeline && python scripts/inmet_avisos_sync.py --forcar`.
+- Sinal de vida: a cada execução o `inmet_avisos_sync.py` grava
+  `/Volumes/weather_pipeline/bronze/coletores/celular.json`; o painel fica 🔴 com
+  2,5 h sem contato.
+- Ao ligar, o script de boot espera a rede e roda os dois coletores uma vez (o cron
+  não recupera as execuções perdidas com o celular desligado). Depois de mudar o
+  `boot.sh`, copie de novo para `~/.termux/boot/weather-dlt-pipeline.sh`.
 
 ## Acesso remoto (SSH via Tailscale)
 
