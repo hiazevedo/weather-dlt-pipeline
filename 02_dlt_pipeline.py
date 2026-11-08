@@ -191,6 +191,46 @@ dlt.apply_changes(
 
 # COMMAND ----------
 
+# SILVER: toda previsão emitida, com a antecedência (append-only).
+# A weather_clean guarda só a previsão mais recente de cada hora; aqui fica
+# o que cada coleta previu para cada hora futura — a base para treinar e
+# avaliar por antecedência (1–168 h) e calibrar a probabilidade da Open-Meteo.
+FORECAST_VARS = {
+    "precipitation": "precipitation", "precipitation_probability": "precipitation_probability",
+    "rain": "rain", "temperature_2m": "temperature_2m", "apparent_temperature": "apparent_temperature",
+    "relative_humidity_2m": "relative_humidity", "dew_point_2m": "dew_point_2m",
+    "pressure_msl": "pressure_msl", "cloud_cover": "cloud_cover", "cloud_cover_low": "cloud_cover_low",
+    "cloud_cover_mid": "cloud_cover_mid", "cloud_cover_high": "cloud_cover_high",
+    "windspeed_10m": "windspeed", "wind_direction_10m": "wind_direction_10m",
+    "wind_gusts_10m": "wind_gusts_10m", "total_column_integrated_water_vapour": "tcwv",
+    "boundary_layer_height": "boundary_layer_height",
+}
+
+@dlt.table(
+    name    = "forecast_emitida",
+    comment = "Cada previsão da Open-Meteo coletada (emitida_em) para cada hora futura (valida_em), com a antecedência",
+    table_properties = {"quality": "silver"}
+)
+@dlt.expect_or_drop("antecedencia_valida", "antecedencia_h BETWEEN 0 AND 192")
+def forecast_emitida():
+    emitida = F.from_utc_timestamp(F.to_timestamp("collected_at"), TZ_LOCAL)   # hora local, como valida_em
+    df = (
+        dlt.read_stream("weather_raw")
+        .filter(~F.col("is_historical"))
+        .withColumn("emitida_em", emitida)
+        .withColumn("idx", F.explode(F.sequence(F.lit(0), F.expr("size(data.hourly.time) - 1"))))
+        .withColumn("valida_em", F.to_timestamp(F.col("data.hourly.time")[F.col("idx")]))
+        # horas inteiras desde a hora cheia da coleta: 0 = hora da coleta, 1 = próxima…
+        .withColumn("antecedencia_h", ((F.unix_timestamp("valida_em")
+                    - F.unix_timestamp(F.date_trunc("hour", "emitida_em"))) / 3600).cast("int"))
+    )
+    for origem, destino in FORECAST_VARS.items():
+        df = df.withColumn(destino, F.col(f"data.hourly.{origem}")[F.col("idx")])
+    return df.select("emitida_em", "valida_em", "antecedencia_h", "cidade",
+                     *FORECAST_VARS.values(), "_source_file")
+
+# COMMAND ----------
+
 # GOLD: Resumo diário histórico
 @dlt.table(
     name    = "weather_daily",

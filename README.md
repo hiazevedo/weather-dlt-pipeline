@@ -66,7 +66,8 @@ Open-Meteo API (histórico 1940→2026 + previsão 48h)
 | `weather_clean` | Silver | 761K horas | Dados limpos + classificações; uma linha por hora (`apply_changes`) |
 | `weather_daily` | Gold | 31K dias | Resumo diário histórico |
 | `weather_monthly` | Gold | 1K meses | Climatologia mensal |
-| `weather_forecast` | Gold | 168h | Previsão próximas 48h |
+| `weather_forecast` | Gold | 168h | Previsão dos próximos 7 dias (inclui chance de chuva e rajadas) |
+| `forecast_emitida` | Silver | ~120K linhas | Cada previsão coletada (`emitida_em`) para cada hora futura (`valida_em`), com `antecedencia_h` — base para avaliar e treinar por antecedência (streaming, append) |
 
 ---
 
@@ -104,6 +105,8 @@ weather-dlt-pipeline/
 ├── 11_ingest_avisos.py      # Avisos do INMET (JSON no Volume) → silver.inmet_avisos + views gold
 ├── 12_enso_impacto.py       # ENSO × clima de Birigui → gold.enso_impacto, enso_previsibilidade, estacao_chuvosa + views estacao_vs_analogos e acuracia_por_enso
 ├── 13_collect_ana.py        # ANA: postos (leitura diária) e telemetria → silver.ana_* + view gold.ana_telemetria_qc
+├── 14_vigia.py              # Vigia: falha (→ e-mail) quando o job de 1h, a coleta, o celular ou o backfill param
+├── 15_collect_merge.py      # MERGE/CPTEC horário nos pontos de interesse → silver.merge_hourly (sob demanda)
 ├── scripts/inmet_sync.py    # Coleta local do INMET (o INMET bloqueia o Databricks)
 ├── scripts/inmet_avisos_sync.py # Coleta local dos avisos do INMET (só envia quando mudam)
 ├── scripts/dbx.py           # Cliente mínimo da API REST do Databricks (envio e disparo de jobs)
@@ -158,12 +161,25 @@ Ele fecha sozinho buracos deixados por falhas do job de hora em hora e troca, na
 recentes, o "passado" da API de previsão pelos dados do Archive — a mesma fonte
 usada no treino do modelo.
 
+### Alertas
+
+- **Falha** de qualquer job: e-mail do Databricks (`email_notifications.on_failure`).
+- **Job de 1h lento** (> 30 min; o normal é ~6 min): e-mail de duração (`health`).
+- **Algo parou** sem falhar: o job `[weather] Vigia (a cada 3 h)` (`14_vigia`) falha,
+  e o e-mail de falha sai, quando há mais de 2,5 h sem previsão nova da Open-Meteo,
+  sem execução completa do job de 1h ou sem sinal do celular, ou mais de 8 dias sem
+  o backfill semanal. Cada problema alerta uma vez e repete a cada 12 h
+  (`gold.vigia_alertas`). Para testar o e-mail: rode o job com o parâmetro
+  `simular=<texto>`.
+- **Limite:** se o Databricks bloquear todas as execuções do workspace (como de 02 a
+  07/11/2026), o vigia também não roda e nada avisa.
+
 ### Fontes de dados
 
 | Fonte | O que traz | Tabela |
 |---|---|---|
 | Open-Meteo Archive (ERA5/IFS) | Série horária desde 1940 — temperatura, chuva, umidade, vento + orvalho, pressão, nuvens por camada, direção do vento, vapor d'água na coluna e camada limite | `silver.weather_clean` |
-| Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis) a cada hora | `silver.weather_forecast` |
+| Open-Meteo Forecast | Previsão de 7 dias (mesmas variáveis + chance de chuva e rajadas) a cada hora | `silver.weather_forecast`, `silver.forecast_emitida` |
 | Open-Meteo Previous Runs | O que cada rodada previu 0, 1 e 2 dias antes (desde 2024) | `silver.forecast_previous_runs` |
 | NOAA CPC | Índice ONI (El Niño / La Niña), global | `silver.enso_oni` |
 | NOAA GHCN-Daily | Chuva medida em pluviômetros num raio de 20 km (em Birigui, 1939–1997); são os mesmos postos da ANA, que vão até 2024 | `silver.gauge_daily` |
@@ -171,6 +187,29 @@ usada no treino do modelo.
 | ANA (estações telemétricas) | Chuva a cada 10–30 min em estações num raio de 30 km, com qualidade irregular (ver abaixo) | `silver.ana_chuva_horaria`, `gold.ana_telemetria_qc` |
 | INMET (avisos meteorológicos) | Avisos oficiais repassados pela Defesa Civil (tempestade, chuvas intensas…) com municípios (IBGE), severidade, início/fim, riscos e polígono — coletados a cada hora | `silver.inmet_avisos`, `gold.avisos_cidade`, `gold.avisos_vs_modelo` |
 | INMET (estações automáticas) | Chuva, temperatura, orvalho, pressão, umidade e vento **medidos**, por hora, nas estações num raio de 80 km (José Bonifácio 49 km, Valparaíso 61 km, Tupã 73 km, Lins 75 km), desde 2006 | `silver.inmet_hourly` |
+| MERGE/CPTEC (INPE) | Chuva horária em grade de 10 km (satélite GPM-IMERG + pluviômetros), nos pontos de Birigui e das estações do INMET, desde jun/2023. **Não serve de rótulo para Birigui** (ver abaixo); coletado só sob demanda (`15_collect_merge`, sem agendamento) | `silver.merge_hourly` |
+
+#### Chuva medida em Birigui: o que existe
+
+A cidade não tem pluviômetro automático. Em nov/2026:
+
+- **CEMADEN:** nenhuma estação em Birigui nem nas cidades vizinhas (a de Lins está
+  parada desde 2016).
+- **INMET:** as estações ficam a 49–75 km, e José Bonifácio e Valparaíso estão sem
+  chuva válida desde jul/2026.
+- **ANA:** 5 postos a até 6 km, mas leitura diária e com ~2 anos de atraso (dados
+  até jan/2024). Servem para validar, não para operar.
+- **MERGE/CPTEC:** nos pontos das estações do INMET, bate com elas hora a hora
+  (correlação 0,77), porque as usa. Contra os 5 postos da ANA em Birigui, que são
+  independentes (243 dias, jun/2023–jan/2024), fica pior que o Open-Meteo:
+  correlação diária 0,37 (Open-Meteo 0,57), capta 45% do volume (Open-Meteo 80%) e
+  marca chuva em 14% dos dias (postos 29%, Open-Meteo 30%). Longe de pluviômetro,
+  ele é praticamente satélite. Detalhes em `gold.merge_validacao` (experimento 15
+  do bundle de ML).
+
+Conclusão: no **dia**, o Open-Meteo acompanha bem os postos (dias com chuva 30%
+contra 29%); o exagero dele é na **hora** (chuva em 12% das horas, contra 3–5% nos
+pluviômetros), ao espalhar a chuva do dia em muitas horas fracas.
 
 #### ANA: chuva medida em Birigui (postos e telemetria)
 
